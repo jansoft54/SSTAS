@@ -1,0 +1,15 @@
+train:
+  dataset: "50salads"
+  batch-size: 16
+  shuffle: True
+  optimizer:
+    name: "AdamW"
+
+test:
+  dataset: "50salads"
+
+val:
+  dataset: "50salads"
+
+run:
+  eval: "train"
