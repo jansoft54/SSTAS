@@ -1,7 +1,7 @@
 
 from collections import defaultdict
 from typing import List
-from SSTAS.eval.metrics.external.mstcn_code import f_score
+from metrics.mstcn_code import f_score
 import numpy as np
 import torch
 class F1Score():
@@ -12,7 +12,7 @@ class F1Score():
         window_size: int = 1,
         num_classes: int = None,
     ):
-        super(F1Score, self).__init__(window_size=window_size)
+       
         self.overlaps = overlaps
         self.ignore_ids = ignore_ids
         self.num_classes = num_classes
@@ -56,10 +56,7 @@ class F1Score():
         predictions = np.array(predictions)
         for target, pred in zip(targets, predictions):
             current_result = {}
-            mask = np.logical_not(np.isin(target, self.ignore_ids))
-            target = target[mask]
-            pred = pred[mask]
-
+            
             for s in range(len(self.overlaps)):
                 tp1, fp1, fn1 = f_score(
                     pred.tolist(),
@@ -67,6 +64,7 @@ class F1Score():
                     self.overlaps[s],
                     ignored_classes=self.ignore_ids,
                 )
+             
                 self.tp[s] += tp1
                 self.fp[s] += fp1
                 self.fn[s] += fn1
@@ -74,7 +72,8 @@ class F1Score():
                 current_f1 = self.get_f1_score(tp1, fp1, fn1)
                 current_result[f"F1@{int(self.overlaps[s]*100)}"] = current_f1
                 #self.deque.append(current_result)
-
+        
+      #  print(self.tp,self.fp,self.fn)
         return current_result
 
     def summary(self) -> dict:
@@ -99,16 +98,11 @@ class F1Score():
 
     @staticmethod
     def get_f1_score(tp: float, fp: float, fn: float) -> float:
-        if tp + fp != 0.0:
-            precision = tp / (tp + fp)
-            recall = tp / (tp + fn)
-        else:
-            precision = 0.0
-            recall = 0.0
+        precision = tp / (tp + fp)
+        recall = tp / (tp + fn)
+       
 
-        if precision + recall != 0.0:
-            f1 = 2.0 * (precision * recall) / (precision + recall)
-        else:
-            f1 = 0.0
-
+       
+        f1 = 2.0 * (precision * recall) / (precision + recall)
+       
         return f1

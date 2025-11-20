@@ -1,6 +1,6 @@
 
 from typing import Iterable
-from SSTAS.eval.metrics.external.mstcn_code import edit_score
+from metrics.mstcn_code import edit_score
 import torch
 import numpy as np
 class Edit():
