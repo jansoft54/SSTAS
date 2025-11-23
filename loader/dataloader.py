@@ -29,7 +29,7 @@ class VideoDataSet(Dataset):
             for line in f:
                 idx, label = line.strip().split(" ")
                 label_to_index[label] = int(idx)    
-            
+        
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 feature_name = line.split(".txt\n")[0]
@@ -42,13 +42,14 @@ class VideoDataSet(Dataset):
                 data_obj["features"] = features
                 data_obj["target_mask"] = target_masked
                 data_obj["target_truth"] = target_truth
-
+               
                 self.data.append(data_obj)
                 
 
     def _load_features_(self,feature_name):
         path = Path(f"{self.default_path}/{self.dataset}/features/{feature_name}.npy")
-        features_np = np.load(path)         
+        features_np = np.load(path)       
+      
         return torch.from_numpy(features_np).float().T  
         
 

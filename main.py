@@ -1,16 +1,15 @@
-from datasets import load_dataset
+from model.bert import ActionBERT, ActionBERTConfig
+from trainer import Trainer,TrainerConfig
 
-SPLIT = 1
-dataset = load_dataset("dinggd/breakfast", name=f"split{SPLIT}")
 
-# Trainings‐Daten
-print(len(dataset["train"]))
-"""for x in dataset["train"]:
-    video_id, video_feature, video_label = x
-    # z. B. print(video_id, video_feature.shape, video_label)
+knows = 14
+unknowns = 5
+prototypes = 15
+trainer_config = TrainerConfig()
+trainer = Trainer(config=trainer_config)
 
-# Test‐Daten
-for x in dataset["test"]:
-    video_id, video_feature, video_label = x
-    # z. B. print(video_id, video_feature.shape, video_label)
-"""
+model = ActionBERT(ActionBERTConfig(total_classes=knows + prototypes))
+
+print("Active parameters: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
+trainer.add_model(model=model)  # Hier sollte das eigentliche Modell übergeben werden
+trainer.train_step()
