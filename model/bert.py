@@ -6,13 +6,14 @@ import torch.nn as nn
 import math
 import torch.nn.functional as F
 
+
 class ActionBERTConfig:
     def __init__(self,
                  total_classes= 10,
                  input_dim=2048,
-                 d_model=256,
+                 d_model=128,
                  num_heads=8,
-                 num_layers=5,
+                 num_layers=4,
                  ffn_dim=128,
                  dropout=0.1):
         self.total_classes = total_classes
@@ -101,9 +102,13 @@ class LocalAttention(nn.Module):
     def forward(self, x,padding_mask):
         batch_size, seq_len, dim = x.size()
         q, k, v, _, pk, _ = self.create_windows(x,padding_mask=padding_mask)
-        attn_output, _ = self.mha(q, k, v, key_padding_mask=pk)
+
+        attn_output, _ = self.mha(q, k, v, key_padding_mask=~pk)
         attn_output = attn_output.view(batch_size, -1, self.local_window_size, dim)
         attn_output = attn_output.flatten(1, 2)[:,:seq_len,:]
+        if torch.isnan(attn_output).any():
+            raise Exception("NaN values detected in LOCAL attention output")
+            attn_output = torch.nan_to_num(attn_output, nan=0.0)    
         return attn_output.contiguous()
 
 
@@ -139,10 +144,15 @@ class GlobalAttention(nn.Module):
     def forward(self, x,padding_mask):
         B,T,C = x.shape
         q, k, v, _, pk, _ = self.create_windows(x,padding_mask=padding_mask)
-        attn_output, _ = self.mha(q, k, v, key_padding_mask=pk)
+
+        attn_output, _ = self.mha(q, k, v, key_padding_mask=~pk)
+
         attn_output = attn_output.view(B, self.window_dilation,-1, C)
         attn_output = attn_output.permute(0, 2, 1, 3).contiguous().view(B, -1, C)
-        attn_output = attn_output[:,:T,:]        
+        attn_output = attn_output[:,:T,:]
+        if torch.isnan(attn_output).any():
+            raise Exception("NaN values detected in GLOBAL attention output")
+            attn_output = torch.nan_to_num(attn_output, nan=0.0)        
         return attn_output.contiguous()
     
 class Block(nn.Module):
@@ -166,10 +176,8 @@ class Block(nn.Module):
         x: [B, T, D]
         """
         attn_input = self.norm1(x)
-        
         local_out = self.local_attn(attn_input, padding_mask)
         x = x + self.dropout(local_out) 
-        
         global_input = self.norm2(x)
         global_out = self.global_attn(global_input, padding_mask)
         x = x + self.dropout(global_out)
@@ -192,7 +200,7 @@ class ActionBERT(nn.Module):
         self.config = config
         self.input_proj = nn.Linear(config.input_dim,config.d_model)
         self.output_head = nn.Linear(config.d_model, config.input_dim)
-        self.classification_head = nn.Linear(config.d_model, config.total_classes)
+        self.prototypes = nn.Linear(config.d_model, config.total_classes)
 
         self.pos_encoding = PositionalEncoding(config.d_model)
         self.masking_module = MaskingModule(config.input_dim,config.d_model)
@@ -211,9 +219,10 @@ class ActionBERT(nn.Module):
         x = self.masking_module(x,mask=patch_mask)
 
         x = self.pos_encoding(x)
-
+       
         for layer in self.layers:
+         
             x = layer(x,padding_mask=padding_mask)
         recon_features = self.output_head(x)
-        class_logits = self.classification_head(x)
-        return recon_features, class_logits
+        prototype_logits = self.prototypes(x)
+        return recon_features, prototype_logits

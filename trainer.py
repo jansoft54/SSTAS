@@ -2,6 +2,7 @@
 
 
 from loader.dataloader import VideoDataSet,VideoDataLoader
+from model.loss import PIMLoss
 import torch
 
 
@@ -9,14 +10,16 @@ class TrainerConfig:
     def __init__(self,
                  dataset:str ="50salads",
                  split: str = "train.split1.bundle",
-                 default_path="../data/data/",
+                 default_path="./data/data/",
                  knowns:int=0,
-                 unknowns:int=0):
+                 unknowns:int=0,
+                 K:int=0):
         self.dataset = dataset
         self.split = split
         self.default_path = default_path
         self.knowns = knowns
         self.unknowns = unknowns
+        self.K = K
         self.learning_rate = 3e-4
         self.epsilon = 1e-8
         self.num_epochs = 100
@@ -32,10 +35,12 @@ class Trainer():
                                split=config.split,
                                default_path=config.default_path,
                                knowns=config.knowns,
-                               unknowns=config.unknowns)
+                               unknowns=config.unknowns,
+                               total_classes=config.knowns + config.K)
         self.data_loader = VideoDataLoader(self.video_dataset, batch_size=1, shuffle=True)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.mse = torch.nn.MSELoss()
+        self.pim = PIMLoss(l=1.0,momentum=0.9,eps=1e-8,num_classes=config.knowns + config.K,device=self.device)
     def add_model(self,model):
         self.model = model
         self.model.to(self.device)
@@ -64,21 +69,34 @@ class Trainer():
                 masked_count += span_len 
                 
         return mask.to(self.device)
-    def train_step(self):
+    def train(self,epochs:int):
+        for epoch in range(epochs):
+            for batch in self.data_loader:
+                features = batch["features"].to(self.device)
+             #   print(features.shape)
+                unknown_mask = batch["unknown_mask"].to(self.device)
+                target_truth = batch["target_truth"].to(self.device)
+                padding_mask = batch["padding_mask"].to(self.device)
+                
+                patch_mask = self._generate_span_mask(features,mask_ratio=0.5,min_span=5,max_span=20)
+                patch_mask = patch_mask & (padding_mask.bool()) 
+                
+                self.model.train()
+                
+                recon_feat, class_logits = self.model(features,patch_mask=patch_mask,padding_mask=padding_mask)
+                pim_loss = self.pim(class_logits,
+                                    target_truth,
+                                    unknown_mask=unknown_mask,
+                                    known_mask=~unknown_mask & padding_mask)
+                mse_loss = self.mse(recon_feat[patch_mask & padding_mask ],features[patch_mask & padding_mask])
+                
+            
+                loss = mse_loss + pim_loss
+                print(loss.item())
+                self.optim.zero_grad()
+                loss.backward()
+                self.optim.step()
+
+                 
         
-        for batch in self.data_loader:
-            features = batch["features"].to(self.device)
-            target_mask = batch["target_masked"]
-            target_truth = batch["target_truth"]
-            padding_mask = batch["mask"].to(self.device)
-            
-            patch_mask = self._generate_span_mask(features,mask_ratio=0.5,min_span=5,max_span=20)
-            patch_mask = patch_mask & (padding_mask.bool()) 
-            
-            self.model.train()
-            recon_feat, class_logits = self.model(features,patch_mask=patch_mask,padding_mask=padding_mask)
-            
-            self.mse_loss = self.mse(recon_feat[patch_mask],target_truth[patch_mask])
-            break
-    
-       
+        
