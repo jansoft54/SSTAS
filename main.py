@@ -24,4 +24,4 @@ model = ActionBERT(config=bert_conf)
 
 print("Active parameters: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
 trainer.add_model(model=model)  
-trainer.train(epochs=10)
+trainer.train(epochs=20)

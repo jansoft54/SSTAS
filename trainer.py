@@ -22,7 +22,7 @@ class TrainerConfig:
         self.knowns = knowns
         self.unknowns = unknowns
         self.K = K
-        self.learning_rate = 3e-4
+        self.learning_rate = 2e-4
         self.epsilon = 1e-8
         self.num_epochs = 100
         self.batch_size = 1
@@ -54,7 +54,7 @@ class Trainer():
                                        eps=self.config.epsilon )
 
         
-    def _generate_span_mask(self,features,mask_ratio=0.5,min_span=5,max_span=20):
+    def _generate_span_mask(self,features,mask_ratio=0,min_span=5,max_span=20):
         """
         Generate span mask for input features.
         features: [B, S, D]
@@ -85,7 +85,8 @@ class Trainer():
                 padding_target_start = batch["target_start"].to(self.device)
                 padding_target_end = batch["target_end"].to(self.device)
                 
-                patch_mask = self._generate_span_mask(features,mask_ratio=0.5,min_span=5,max_span=20)
+                patch_mask = self._generate_span_mask(features,mask_ratio=0,min_span=5,max_span=20)
+                #print(patch_mask)
                 patch_mask = patch_mask & (padding_mask.bool()) 
                 
                 self.model.train()
@@ -101,7 +102,7 @@ class Trainer():
                 boundary_loss = self.l1(boundaries[:,:,0][~unknown_mask & padding_mask], padding_target_start[~unknown_mask & padding_mask].float()) + self.l1(boundaries[:,:,1][~unknown_mask & padding_mask], padding_target_end[~unknown_mask & padding_mask].float())
             
         
-                loss = mse_loss + boundary_loss #+ pim_loss# + boundary_loss
+                loss =  boundary_loss #+ pim_loss# + boundary_loss
                 self.optim.zero_grad()
                 loss.backward()
                 print(loss.item())
