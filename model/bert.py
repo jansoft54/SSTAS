@@ -102,13 +102,17 @@ class LocalAttention(nn.Module):
     def forward(self, x,padding_mask):
         batch_size, seq_len, dim = x.size()
         q, k, v, _, pk, _ = self.create_windows(x,padding_mask=padding_mask)
-
-        attn_output, _ = self.mha(q, k, v, key_padding_mask=~pk)
+        attn_mask = ~pk 
+        all_masked_rows = attn_mask.all(dim=-1)
+        
+        if all_masked_rows.any():
+            attn_mask[all_masked_rows, 0] = False 
+        attn_output, _ = self.mha(q, k, v, key_padding_mask=attn_mask)
+        
         attn_output = attn_output.view(batch_size, -1, self.local_window_size, dim)
         attn_output = attn_output.flatten(1, 2)[:,:seq_len,:]
         if torch.isnan(attn_output).any():
             raise Exception("NaN values detected in LOCAL attention output")
-            attn_output = torch.nan_to_num(attn_output, nan=0.0)    
         return attn_output.contiguous()
 
 
@@ -143,6 +147,7 @@ class GlobalAttention(nn.Module):
     
     def forward(self, x,padding_mask):
         B,T,C = x.shape
+        
         q, k, v, _, pk, _ = self.create_windows(x,padding_mask=padding_mask)
 
         attn_output, _ = self.mha(q, k, v, key_padding_mask=~pk)
@@ -194,7 +199,7 @@ class Block(nn.Module):
 
 class ActionBERT(nn.Module):
     def __init__(self, 
-                 config: ActionBERTConfig,   # Feature Dimension (z.B. I3D)
+                 config: ActionBERTConfig,   
                ):
         super().__init__()
         self.config = config
@@ -202,6 +207,15 @@ class ActionBERT(nn.Module):
         self.output_head = nn.Linear(config.d_model, config.input_dim)
         self.prototypes = nn.Linear(config.d_model, config.total_classes)
 
+        self.boundary_head = nn.Sequential(
+            nn.LayerNorm(config.d_model),
+            nn.Linear(config.d_model, config.d_model*2),
+            nn.GELU(),
+            nn.Linear(config.d_model*2, config.d_model//2),
+            nn.GELU(),
+            nn.Linear(config.d_model//2, 2)
+        )
+        
         self.pos_encoding = PositionalEncoding(config.d_model)
         self.masking_module = MaskingModule(config.input_dim,config.d_model)
 
@@ -211,18 +225,13 @@ class ActionBERT(nn.Module):
         ])
 
     def forward(self, x,patch_mask,padding_mask):
-        """
-        x: [B, T, D_in]  (z.B. B=Batch, T=Frames, D_in=I3D-Features)
-        """
-    
         x = self.input_proj(x) 
         x = self.masking_module(x,mask=patch_mask)
-
         x = self.pos_encoding(x)
-       
         for layer in self.layers:
-         
             x = layer(x,padding_mask=padding_mask)
+            
+        boundaries = self.boundary_head(x)
         recon_features = self.output_head(x)
         prototype_logits = self.prototypes(x)
-        return recon_features, prototype_logits
+        return recon_features, prototype_logits, boundaries

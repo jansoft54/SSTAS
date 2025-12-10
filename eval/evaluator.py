@@ -73,43 +73,60 @@ class Evaluator():
             pred_indices[pred_indices == orig_classes + c] = l
         
         return pred_indices, targets_indices
-    def evaluate(self,model_pred, ground_truth,mask):
-        model_pred,ground_truth = self.compute_hungarian_cost(model_pred, ground_truth)
-        mask = mask == 1
-        
-        model_pred = model_pred[mask]
-        ground_truth = ground_truth[mask]
-
+    
+    def _eval(self,model_pred, ground_truth,padding_mask,unknown_mask):
+        model_pred = model_pred[padding_mask & unknown_mask]
+        ground_truth = ground_truth[padding_mask & unknown_mask]
         mof_metric = MoFAccuracyMetric()
         edit_metric = Edit()
         f1_metric = F1Score(num_classes=self.unkown_classes+self.known_classes)
         mof_metric.add(ground_truth, model_pred)
         edit_metric.add(ground_truth, model_pred)
         f1_metric.add(ground_truth.unsqueeze(dim=0), model_pred.unsqueeze(dim=0))
-
-       
-       
-        results = [
-            {"name":  self.evaluation_name,
-             "mof": mof_metric.summary(),
+        
+        return {"name":  self.evaluation_name,
+             "mof": mof_metric.summary() * 100,
              "edit": edit_metric.summary(),
-             "f1_10": f1_metric.summary()["F1@10"],
-             "f1_25": f1_metric.summary()["F1@25"],
-             "f1_50": f1_metric.summary()["F1@50"],},
-        ]
+             "f1_10": f1_metric.summary()["F1@10"]* 100,
+             "f1_25": f1_metric.summary()["F1@25"]* 100,
+             "f1_50": f1_metric.summary()["F1@50"]* 100,},
         
-        self._print_results_table(results)
-
-    def _print_results_table(self,results):
-        headers = ["Model", "MOF", "Edit", "F1@0.10", "F1@0.25", "F1@0.50"]
-        line = "+-----------+--------+--------+---------+---------+---------+"
-        print(line)
-        print("| {:9} | {:6} | {:6} | {:7} | {:7} | {:7} |".format(*headers))
-        print(line)
-        for r in results:
-            print("| {:9} | {:6.1f} | {:6.1f} | {:7.1f} | {:7.1f} | {:7.1f} |".format(
-                r["name"], r["mof"], r["edit"], r["f1_10"], r["f1_25"], r["f1_50"]
-            ))
-        print(line)
+        
+        
+    def evaluate(self,model_pred, ground_truth,padding_mask,unknown_mask):
+       # model_pred,ground_truth = self.compute_hungarian_cost(model_pred, ground_truth)
+        
+        unknown_perf = self._eval(model_pred, ground_truth,padding_mask,unknown_mask)
+        known_perf = self._eval(model_pred, ground_truth,padding_mask,~unknown_mask)
 
         
+        self._print_results_table(known_perf,unknown_perf)
+
+    def _print_results_table(self, results_a, results_b, name_a="Known", name_b="Unknown"):
+       
+        line_top = "+-----------+-----------------------------------------------+-----------------------------------------------+"
+        line_metrics = "+-----------+--------+--------+---------+---------+---------+--------+--------+---------+---------+---------+"
+
+        print(line_top)
+        print("| {:9} | {:^45} | {:^45} |".format("Model", name_a, name_b))
+        print(line_metrics)
+        print(
+            "| {:9} | {:6} | {:6} | {:7} | {:7} | {:7} | {:6} | {:6} | {:7} | {:7} | {:7} |".format(
+                "", "MOF", "Edit", "F1@0.10", "F1@0.25", "F1@0.50",
+                "MOF", "Edit", "F1@0.10", "F1@0.25", "F1@0.50",
+            )
+        )
+        print(line_metrics)
+
+        for ra, rb in zip(results_a, results_b):
+            print(
+                "| {:9} | {:6.1f} | {:6.1f} | {:7.1f} | {:7.1f} | {:7.1f} | {:6.1f} | {:6.1f} | {:7.1f} | {:7.1f} | {:7.1f} |".format(
+                    ra["name"],
+                    ra["mof"], ra["edit"], ra["f1_10"], ra["f1_25"], ra["f1_50"],
+                    rb["mof"], rb["edit"], rb["f1_10"], rb["f1_25"], rb["f1_50"],
+                )
+            )
+
+        print(line_metrics)
+
+            
