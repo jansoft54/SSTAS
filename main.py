@@ -10,13 +10,14 @@ trainer_config = TrainerConfig(knowns=knowns,
                                K=prototypes,
                                batch_size=1,
                                output_name="actionbert_first_try"
+                               
                                )
 trainer = Trainer(config=trainer_config)
 bert_conf = ActionBERTConfig(
     total_classes=knowns + prototypes,
     input_dim=2048,
     d_model=32,
-    num_heads=8,
+    num_heads=1,
     num_layers=4,
     ffn_dim=128,
     dropout=0.1)
