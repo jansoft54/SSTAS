@@ -26,18 +26,39 @@ class VideoDataSet(Dataset):
         
         
         mapping_path = Path(f"{self.default_path}/{self.dataset}/mapping.txt")
-        label_to_index = {}
+        self.label_to_index = {}
         with open(mapping_path, "r", encoding="utf-8") as f:
             for line in f:
                 idx, label = line.strip().split(" ")
-                label_to_index[label] = int(idx)    
+                self.label_to_index[label] = int(idx)    
         
+        assert self.knowns + self.unknowns ==  len(self.label_to_index.keys())-1
+        
+        all_labels = sorted(self.label_to_index.keys(), key=lambda x: self.label_to_index[x])
+        self.unknown_actions_list = all_labels[:unknowns]
+        self.known_actions_list = all_labels[unknowns:-1]
+        
+        # 3. Remapping erstellen (Alt -> Neu)
+        self.id_remap = {}
+        self.new_label_dict = {}
+        
+        for i, label in enumerate(self.known_actions_list):
+            old_id = self.label_to_index[label]
+            self.id_remap[old_id] = i
+            self.new_label_dict[label] = i 
+
+        for i, label in enumerate(self.unknown_actions_list):
+            old_id = self.label_to_index[label]
+            self.id_remap[old_id] = i + knowns
+            self.new_label_dict[label] = i + knowns
+     
+
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 feature_name = line.split(".txt\n")[0]
               
                 features = self._load_features_(feature_name)
-                unknown_mask, target_truth = self._load_target_(feature_name,label_to_index)
+                unknown_mask, target_truth = self._load_target_(feature_name,self.label_to_index)
                 target_start, target_end = self.load_start_end_indices(target_truth,unknown_mask)
 
                 data_obj = {}
@@ -46,12 +67,24 @@ class VideoDataSet(Dataset):
                 data_obj["features"] = features
                 data_obj["unknown_mask"] = unknown_mask
                 data_obj["target_truth"] = target_truth
-                data_obj["labels_dict"] = label_to_index
+                data_obj["labels_dict"] =  self.new_label_dict
+                data_obj["remap_dict"] = self.id_remap
                 data_obj["target_start"] = target_start
                 data_obj["target_end"] = target_end
                 
                 self.data.append(data_obj)
-                
+    def _load_target_(self,target_name,label_to_index):
+        target_path = Path(f"{self.default_path}/{self.dataset}/groundTruth/{target_name}.txt")
+        with open(target_path, "r", encoding="utf-8") as f:
+            labels = [line.strip() for line in f]
+        
+        original_indices = [self.label_to_index[lbl] for lbl in labels]
+       
+        remapped_indices = [self.id_remap[oid] for oid in original_indices]
+        target_tensor = torch.tensor(remapped_indices, dtype=torch.long)
+        unknown_mask = (target_tensor >= self.knowns).bool()
+        return unknown_mask,target_tensor
+           
     def load_start_end_indices(self,targets,unknown_mask):
         _, counts = torch.unique_consecutive(targets, return_counts=True)
         start_ramps = [torch.arange(c, dtype=torch.float) for c in counts]
@@ -66,19 +99,12 @@ class VideoDataSet(Dataset):
 
     def _load_features_(self,feature_name):
         path = Path(f"{self.default_path}/{self.dataset}/features/{feature_name}.npy")
-        features_np = np.load(path)       
+        features_np = np.load(path)  
+     
         return torch.from_numpy(features_np).float().T  
         
 
-    def _load_target_(self,target_name,label_to_index):
-        target_path = Path(f"{self.default_path}/{self.dataset}/groundTruth/{target_name}.txt")
-        with open(target_path, "r", encoding="utf-8") as f:
-            labels = [line.strip() for line in f]
-            
-        target_indices = torch.tensor([label_to_index[lbl] for lbl in labels], dtype=torch.long)
-        unknown_mask = (target_indices < self.unknowns).bool()
-        return unknown_mask,target_indices
-
+    
     def __len__(self): return len(self.data)
     def __getitem__(self, idx): return self.data[idx]
    
@@ -129,6 +155,7 @@ class VideoDataLoader(DataLoader):
                 "target_truth":padded_tgts_truth,
                 "target_start":padding_target_start,
                 "target_end":padding_target_end,
-                "labels_dict": batch[0]["labels_dict"]
+                "labels_dict": batch[0]["labels_dict"],
+                "remap_dict": batch[0]["remap_dict"]
                 }
         
