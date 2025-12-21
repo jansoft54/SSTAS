@@ -1,7 +1,7 @@
 
 from collections import defaultdict
 from typing import List
-from metrics.mstcn_code import f_score
+from eval.metrics.mstcn_code import f_score
 import numpy as np
 import torch
 class F1Score():
@@ -98,11 +98,12 @@ class F1Score():
 
     @staticmethod
     def get_f1_score(tp: float, fp: float, fn: float) -> float:
-        precision = tp / (tp + fp)
-        recall = tp / (tp + fn)
+        # Wir fügen eine winzige Zahl (Epsilon) hinzu, um Division durch 0 zu verhindern
+        eps = 1e-7
+        
+        precision = tp / (tp + fp + eps)
+        recall = tp / (tp + fn + eps)
        
-
-       
-        f1 = 2.0 * (precision * recall) / (precision + recall)
+        f1 = 2.0 * (precision * recall) / (precision + recall + eps)
        
         return f1

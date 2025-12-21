@@ -10,7 +10,7 @@ class VideoDataSet(Dataset):
     def __init__(self,
                 dataset:str ="50salads",
                 split: str = "train.split1.bundle",
-                default_path="../data/data/",
+                default_path="./data/data/",
                 knowns:int=0,
                 unknowns:int=0,
                 total_classes:int=10):
@@ -133,12 +133,12 @@ class VideoDataLoader(DataLoader):
         max_len = max(lengths)
         feat_dim = features[0].shape[1]
         
-        padded_feats = torch.zeros(len(batch), max_len, feat_dim)
-        padded_tgts_truth= torch.zeros(len(batch), max_len).long()
-        padded_unknown_mask= torch.zeros(len(batch), max_len).bool()
-        padding_mask = torch.zeros(len(batch), max_len).bool()
-        padding_target_start = torch.zeros(len(batch), max_len)
-        padding_target_end= torch.zeros(len(batch), max_len)
+        padded_feats = torch.ones(len(batch), max_len, feat_dim) * -100
+        padded_tgts_truth= torch.ones(len(batch), max_len).long() * -100
+        padded_unknown_mask= torch.zeros(len(batch), max_len).bool() 
+        padding_mask = torch.zeros(len(batch), max_len).bool() 
+        padding_target_start = torch.ones(len(batch), max_len) * -100
+        padding_target_end= torch.ones(len(batch), max_len) * -100
 
         for i, (f, u, t_t,t_s,t_e) in enumerate(zip(features,unknown_mask ,targets_truth,target_start,target_end)):
             padded_feats[i, :f.shape[0]] = f

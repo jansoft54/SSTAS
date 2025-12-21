@@ -1,6 +1,6 @@
 
 from typing import Iterable
-from metrics.mstcn_code import edit_score
+from eval.metrics.mstcn_code import edit_score
 import torch
 import numpy as np
 class Edit():
@@ -23,9 +23,10 @@ class Edit():
         """
         targets, predictions = np.array(targets), np.array(predictions)
         for target, pred in zip(targets, predictions):
-            mask = np.logical_not(np.isin(target, self.ignore_ids))
+            """ mask = np.logical_not(np.isin(target, self.ignore_ids))
             target = target[mask]
             pred = pred[mask]
+            """
 
             current_score = edit_score(
                 recognized=pred.tolist(),

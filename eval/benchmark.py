@@ -1,30 +1,55 @@
+from eval.evaluator import Evaluator
 import sys
 sys.path.append('../')
 from loader.dataloader import VideoDataLoader, VideoDataSet
-from evaluator import Evaluator
+import torch
+import torch.nn.functional as F
 
-
-knows = 14
+knowns = 14
 unknowns = 5
-        
-dataset = VideoDataSet(dataset="50salads",split="train.split3.bundle",knowns=knows,unknowns=unknowns)
-loader = VideoDataLoader(dataset, batch_size=8, shuffle=True)
 
-for batch in loader:
-    features = batch["features"]
-    target_truth = batch["target_truth"]
-    padding_mask = batch["padding_mask"]
-    unknown_mask = batch["unknown_mask"]
+class TestDataEvaluation:
+    def __init__(self,dataloader):
+        self.loader = dataloader
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+    def eval(self,model,epoch):
+        model.eval()
+        model = model.to(self.device)
+        for batch in self.loader:
+           
+            features = batch["features"].to(self.device)
+            target_truth = batch["target_truth"].to(self.device)
+            padding_mask = batch["padding_mask"].to(self.device)
+            unknown_mask = batch["unknown_mask"].to(self.device)
+            
+            
     
-    print(target_truth.shape,padding_mask.shape)
     
-    evaluator = Evaluator(evaluation_name="First",
-                          dataset="50salads",
-                          default_path="../data/data/",
-                          known_classes=knows,
-                          unkown_classes=unknowns)
-    evaluator.evaluate(model_pred=target_truth[0:1,:],
-                       ground_truth=target_truth[0:1,:],
-                       padding_mask=padding_mask[0:1,:],
-                       unknown_mask=unknown_mask[0:1,:])
-    break
+                
+            recon_feat, class_logits, boundaries= model(features, None, padding_mask)
+            softmax_logits = F.softmax(class_logits, dim=-1)  
+            class_labels = torch.argmax(softmax_logits,dim=-1).cpu()
+            target_truth = target_truth.cpu()
+            padding_mask = padding_mask.cpu()
+            unknown_mask = unknown_mask.cpu()
+         
+            evaluator = Evaluator(evaluation_name="Evaluation",
+                                dataset="50salads",
+                                default_path="./data/data/",
+                                known_classes=knowns,
+                                unkown_classes=unknowns)
+            known_pref, unkown_perf =  evaluator.evaluate(model_pred=class_labels,
+                            ground_truth=target_truth,
+                            padding_mask=padding_mask,
+                            unknown_mask=unknown_mask)
+           
+            known_pref["epoch"] = (epoch)
+            unkown_perf["epoch"] = (epoch)
+            import wandb
+            wandb.log(known_pref)
+        
+
+
+
+

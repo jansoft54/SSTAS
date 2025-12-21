@@ -1,85 +1,102 @@
 
 
-
-from loader.dataloader import VideoDataSet,VideoDataLoader
+from eval.benchmark import TestDataEvaluation
+from loader.dataloader import VideoDataSet, VideoDataLoader
+from model.bert import ActionBERTConfig
 from model.loss import TotalLoss
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from dataclasses import dataclass
-
 import torch
+from trainer_config import TrainerConfig
+import wandb
 
 
-
-
-@dataclass
-class TrainerConfig:
-    dataset: str = "50salads"
-    split: str = "train.split1.bundle"
-    default_path: str = "./data/data/"
-    output_name: str = "output"
-
-    batch_size: int = 1
-    knowns: int = 0
-    unknowns: int = 0
-    K: int = 0
-
-    learning_rate: float = 2e-4
-    epsilon: float = 1e-8
-    num_epochs: int = 50
-    mask_ratio: float = 0.5
-    min_span: int = 5
-    max_span: int = 20
-    
-    
 class Trainer():
-    def __init__(self,config: TrainerConfig):
-        self.config = config
-        self.video_dataset = VideoDataSet(dataset=config.dataset,
-                               split=config.split,
-                               default_path=config.default_path,
-                               knowns=config.knowns,
-                               unknowns=config.unknowns,
-                               total_classes=config.knowns + config.K)
-        self.data_loader = VideoDataLoader(self.video_dataset, batch_size=config.batch_size, shuffle=True)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.total_loss = TotalLoss(config=config)
-        
-    def add_model(self,model):
+    def __init__(self, trainer_config: TrainerConfig, model_config: ActionBERTConfig):
+        self.config = trainer_config
+        self.model_config = model_config
+        self.train_video_dataset = VideoDataSet(dataset=trainer_config.dataset,
+                                                split=trainer_config.train_split,
+                                                default_path=trainer_config.default_path,
+                                                knowns=trainer_config.knowns,
+                                                unknowns=trainer_config.unknowns,
+                                                total_classes=trainer_config.knowns + trainer_config.K)
+        self.train_data_loader = VideoDataLoader(
+            self.train_video_dataset, batch_size=trainer_config.batch_size, shuffle=True)
+
+        self.test_video_dataset = VideoDataSet(dataset=trainer_config.dataset,
+                                               split=trainer_config.test_split,
+                                               default_path=trainer_config.default_path,
+                                               knowns=trainer_config.knowns,
+                                               unknowns=trainer_config.unknowns,
+                                               total_classes=trainer_config.knowns + trainer_config.K)
+        self.test_data_loader = VideoDataLoader(
+            self.test_video_dataset, len(self.test_video_dataset), shuffle=True)
+
+        self.device = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu")
+        self.total_loss = TotalLoss(trainer_config=trainer_config)
+
+        self.evaluator = TestDataEvaluation(self.test_data_loader)
+
+    def add_model(self, model):
         self.model = model
         self.model.to(self.device)
         self.optim = torch.optim.AdamW(model.parameters(),
                                        lr=self.config.learning_rate,
-                                       eps=self.config.epsilon )
+                                       eps=self.config.epsilon)
 
         self.scheduler = CosineAnnealingLR(
-            self.optim, 
-            T_max=self.config.num_epochs, 
+            self.optim,
+            T_max=self.config.num_epochs,
             eta_min=5e-5
         )
-    def _generate_span_mask(self,features,mask_ratio=0,min_span=5,max_span=20):
+        config = vars(self.config) | vars(self.model_config)
+
+        """self.run = wandb.init(
+            project="ActionBERT",
+            name="strong-cosine",
+            config=config
+        )
+        wandb.define_metric("eval/*", step_metric="epoch")"""
+
+    def _generate_structured_mask(self, features, mask_ratio=0.75, block_size=64):
         """
-        Generate span mask for input features.
-        features: [B, S, D]
+        Structured Masking: Unterteilt das Video in Blöcke der Größe 'block_size'.
+        In JEDEM Block werden 'mask_ratio' Prozent maskiert.
+        Das verhindert riesige Lücken und garantiert eine gleichmäßige Schwierigkeit.
         """
         B, S, D = features.size()
         mask = torch.zeros((B, S), dtype=torch.bool)
-        num_mask_frames = int(S * mask_ratio)
-        for b in range(B):
-            masked_count = 0
-            while masked_count < num_mask_frames:
-                span_len = torch.randint(min_span, max_span + 1, (1,)).item()
-                if S - span_len <= 0:
-                    start_idx = 0
-                else:
-                    start_idx = torch.randint(0, S - span_len, (1,)).item()
-                mask[b, start_idx : start_idx + span_len] = True
-                masked_count += span_len 
-                
+
+        mask_len_per_block = int(block_size * mask_ratio)
+
+        for t in range(0, S, block_size):
+            end_t = min(t + block_size, S)
+            actual_block_len = end_t - t
+
+            curr_mask_len = int(actual_block_len * mask_ratio)
+
+            if curr_mask_len == 0:
+                continue
+
+            max_start = actual_block_len - curr_mask_len
+
+            if max_start > 0:
+
+                rel_starts = torch.randint(0, max_start, (B,))
+
+                for b in range(B):
+                    abs_start = t + rel_starts[b].item()
+                    mask[b, abs_start: abs_start + curr_mask_len] = True
+            else:
+                mask[:, t:end_t] = True
+
         return mask.to(self.device)
+
     def train(self):
         for epoch in range(self.config.num_epochs):
-            break
-            for batch in self.data_loader:
+            self.model.train()
+            for batch in self.train_data_loader:
                 features = batch["features"].to(self.device)
 
                 unknown_mask = batch["unknown_mask"].to(self.device)
@@ -87,31 +104,40 @@ class Trainer():
                 padding_mask = batch["padding_mask"].to(self.device)
                 padding_target_start = batch["target_start"].to(self.device)
                 padding_target_end = batch["target_end"].to(self.device)
-                
-                patch_mask = self._generate_span_mask(features,mask_ratio=0.5,min_span=30,max_span=150)
-                patch_mask = patch_mask & (padding_mask.bool()) 
-                
+
+                patch_mask = self._generate_structured_mask(features,
+                                                            mask_ratio=self.config.mask_ratio,
+                                                            block_size=self.config.block_size,)
+
+                patch_mask = patch_mask & (padding_mask.bool())
+
                 self.model.train()
-                recon_feat, class_logits, boundaries = self.model(features,patch_mask=patch_mask,padding_mask=padding_mask)
-                
-                
-                loss = self.total_loss(class_logits,
-                                target_truth,
-                                recon_feat,
-                                features,
-                                unknown_mask,
-                                ~unknown_mask & padding_mask,
-                                patch_mask,
-                                padding_mask) 
-                
+                recon_feat, class_logits, embeddings = self.model(
+                    features, patch_mask=patch_mask, padding_mask=padding_mask)
+
+                loss = self.total_loss(logits=class_logits,
+                                       embeddings=embeddings,
+                                       target_labels=target_truth,
+                                       recon_features=recon_feat,
+                                       target_features=features,
+                                       unknown_mask=unknown_mask,
+                                       known_mask=~unknown_mask & padding_mask,
+                                       patch_mask=patch_mask,
+                                       padding_mask=padding_mask)
+                wandb.log({
+                    "epoch": epoch,
+                })
                 self.optim.zero_grad()
-                loss.backward() 
-                    
+                loss.backward()
+
                 self.optim.step()
-            print(f"-------------------- Epoch {epoch+1}/{self.config.num_epochs} -------------------- ")
+            self.evaluator.eval(self.model, epoch)
+            print(
+                f"-------------------- Epoch {epoch+1}/{self.config.num_epochs} -------------------- ")
             self.scheduler.step()
 
-        print(f"Training completed. Saving model {self.config.output_name} ...")
-        torch.save(self.model.state_dict(), f"./output/{self.config.output_name}.pth")
-                 
-        
+        print(
+            f"Training completed. Saving model {self.config.output_name} ...")
+        torch.save(self.model.state_dict(),
+                   f"./output/{self.config.output_name}.pth")
+        self.run.finish()

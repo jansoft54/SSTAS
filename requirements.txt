@@ -1,1 +1,6 @@
 yaml-configuration>=0.3.1
+matplotlib
+scikit-learn
+plotly
+pandas
+wandb

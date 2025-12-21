@@ -1,5 +1,6 @@
 data/*
 output/*
+wandb/*
 logs/*
 *.pth
 __pycache__/

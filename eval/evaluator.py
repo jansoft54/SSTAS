@@ -1,8 +1,8 @@
 
 from pathlib import Path
-from metrics.Edit import Edit
-from metrics.MoF import MoFAccuracyMetric
-from metrics.F1Score import F1Score
+from eval.metrics.F1Score import F1Score
+from eval.metrics.Edit import Edit
+from eval.metrics.MoF import MoFAccuracyMetric
 import torch
 from scipy.optimize import linear_sum_assignment
 
@@ -74,33 +74,48 @@ class Evaluator():
         
         return pred_indices, targets_indices
     
-    def _eval(self,model_pred, ground_truth,padding_mask,unknown_mask):
-        model_pred = model_pred[padding_mask & unknown_mask]
-        ground_truth = ground_truth[padding_mask & unknown_mask]
-        mof_metric = MoFAccuracyMetric()
-        edit_metric = Edit()
-        f1_metric = F1Score(num_classes=self.unkown_classes+self.known_classes)
-        mof_metric.add(ground_truth, model_pred)
-        edit_metric.add(ground_truth, model_pred)
-        f1_metric.add(ground_truth.unsqueeze(dim=0), model_pred.unsqueeze(dim=0))
-        
-        return {"name":  self.evaluation_name,
-             "mof": mof_metric.summary() * 100,
-             "edit": edit_metric.summary(),
-             "f1_10": f1_metric.summary()["F1@10"]* 100,
-             "f1_25": f1_metric.summary()["F1@25"]* 100,
-             "f1_50": f1_metric.summary()["F1@50"]* 100,},
+    def _eval(self,model_pred, ground_truth,padding_mask,unknown_ids,num_classes):
         
         
+        unknown_ids_list = list(unknown_ids)
+        ignore_list = unknown_ids_list + [-100] 
         
-    def evaluate(self,model_pred, ground_truth,padding_mask,unknown_mask):
+       
+        gt_prepared = ground_truth.clone()
+        pred_prepared = model_pred.clone()
+        
+        gt_prepared[~padding_mask] = -100
+        pred_prepared[~padding_mask] = -100
+        
+        mof_metric = MoFAccuracyMetric(ignore_ids=ignore_list)
+        edit_metric = Edit(ignore_ids=ignore_list)
+        f1_metric = F1Score(num_classes=num_classes,ignore_ids=ignore_list)
+   
+        mof_metric.add(gt_prepared, pred_prepared)
+        edit_metric.add(gt_prepared, pred_prepared)
+        f1_metric.add(gt_prepared,pred_prepared)
+        
+        
+        return {
+             "eval/mof": (mof_metric.summary() * 100),
+             "eval/edit": (edit_metric.summary()),
+             "eval/f1_10": (f1_metric.summary()["F1@10"]* 100),
+             "eval/f1_25": (f1_metric.summary()["F1@25"]* 100),
+             "eval/f1_50": (f1_metric.summary()["F1@50"]* 100)}
+        
+        
+        
+    def evaluate(self,model_pred, ground_truth,padding_mask,unknown_mask,print_results=False):
        # model_pred,ground_truth = self.compute_hungarian_cost(model_pred, ground_truth)
-        
-        unknown_perf = self._eval(model_pred, ground_truth,padding_mask,unknown_mask)
-        known_perf = self._eval(model_pred, ground_truth,padding_mask,~unknown_mask)
+        unknown_on_known = range(self.known_classes, self.known_classes + self.unkown_classes)
+        unknown_on_unknown = range(self.known_classes)
 
-        
-        self._print_results_table(known_perf,unknown_perf)
+        unknown_perf = self._eval(model_pred, ground_truth,padding_mask,unknown_on_unknown,self.unkown_classes )
+        known_perf = self._eval(model_pred, ground_truth,padding_mask,unknown_on_known,self.known_classes)
+
+        if print_results:
+            self._print_results_table(known_perf,unknown_perf)
+        return known_perf, unknown_perf
 
     def _print_results_table(self, results_a, results_b, name_a="Known", name_b="Unknown"):
        
