@@ -3,6 +3,7 @@ from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 
 import numpy as np
+
 import torch
 
 
@@ -32,7 +33,7 @@ class VideoDataSet(Dataset):
                 idx, label = line.strip().split(" ")
                 self.label_to_index[label] = int(idx)    
         
-        assert self.knowns + self.unknowns ==  len(self.label_to_index.keys())-1
+        assert self.knowns + self.unknowns ==  len(self.label_to_index.keys())-1 
         
         all_labels = sorted(self.label_to_index.keys(), key=lambda x: self.label_to_index[x])
         self.unknown_actions_list = all_labels[:unknowns]
@@ -52,13 +53,14 @@ class VideoDataSet(Dataset):
             self.id_remap[old_id] = i + knowns
             self.new_label_dict[label] = i + knowns
      
-
+        self.bg_class =  17
+     
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 feature_name = line.split(".txt\n")[0]
               
                 features = self._load_features_(feature_name)
-                unknown_mask, target_truth = self._load_target_(feature_name,self.label_to_index)
+                unknown_mask,foreground_mask, target_truth = self._load_target_(feature_name,self.label_to_index)
                 target_start, target_end = self.load_start_end_indices(target_truth,unknown_mask)
 
                 data_obj = {}
@@ -66,9 +68,13 @@ class VideoDataSet(Dataset):
                 data_obj["split"] = split
                 data_obj["features"] = features
                 data_obj["unknown_mask"] = unknown_mask
+                data_obj["foreground_mask"] = foreground_mask
+
                 data_obj["target_truth"] = target_truth
+                
                 data_obj["labels_dict"] =  self.new_label_dict
                 data_obj["remap_dict"] = self.id_remap
+                
                 data_obj["target_start"] = target_start
                 data_obj["target_end"] = target_end
                 
@@ -79,11 +85,15 @@ class VideoDataSet(Dataset):
             labels = [line.strip() for line in f]
         
         original_indices = [self.label_to_index[lbl] for lbl in labels]
-       
+        
         remapped_indices = [self.id_remap[oid] for oid in original_indices]
+        
+        
         target_tensor = torch.tensor(remapped_indices, dtype=torch.long)
         unknown_mask = (target_tensor >= self.knowns).bool()
-        return unknown_mask,target_tensor
+        print((target_tensor !=  self.bg_class))
+        foreground_mask = (target_tensor !=  self.bg_class).bool()
+        return unknown_mask,foreground_mask, target_tensor
            
     def load_start_end_indices(self,targets,unknown_mask):
         _, counts = torch.unique_consecutive(targets, return_counts=True)
@@ -125,6 +135,8 @@ class VideoDataLoader(DataLoader):
     def collate_fn(self,batch):
         features = [item["features"] for item in batch]
         unknown_mask = [item["unknown_mask"] for item in batch]
+        foreground_mask = [item["foreground_mask"] for item in batch]
+
         targets_truth = [item["target_truth"] for item in batch]
         target_start = [item["target_start"] for item in batch]
         target_end = [item["target_end"] for item in batch]
@@ -133,24 +145,29 @@ class VideoDataLoader(DataLoader):
         max_len = max(lengths)
         feat_dim = features[0].shape[1]
         
-        padded_feats = torch.ones(len(batch), max_len, feat_dim) * -100
+        padded_feats = torch.ones(len(batch), max_len, feat_dim) * 0
         padded_tgts_truth= torch.ones(len(batch), max_len).long() * -100
         padded_unknown_mask= torch.zeros(len(batch), max_len).bool() 
+        padded_foreground_mask= torch.zeros(len(batch), max_len).bool() 
+
         padding_mask = torch.zeros(len(batch), max_len).bool() 
         padding_target_start = torch.ones(len(batch), max_len) * -100
         padding_target_end= torch.ones(len(batch), max_len) * -100
 
-        for i, (f, u, t_t,t_s,t_e) in enumerate(zip(features,unknown_mask ,targets_truth,target_start,target_end)):
+        for i, (f, u,f_m, t_t,t_s,t_e) in enumerate(zip(features,unknown_mask,foreground_mask ,targets_truth,target_start,target_end)):
             padded_feats[i, :f.shape[0]] = f
             padded_tgts_truth[i, :t_t.shape[0]] = t_t
             padding_mask[i, :f.shape[0]] = True
             padded_unknown_mask[i, :u.shape[0]] = u
+            padded_foreground_mask[i, :f_m.shape[0]] = f_m
             padding_target_start[i, :t_s.shape[0]] = t_s
             padding_target_end[i, :t_e.shape[0]] = t_e
             
 
+
         return {"features":padded_feats,
                 "unknown_mask":padded_unknown_mask,
+                "foreground_mask":padded_foreground_mask,
                 "padding_mask":padding_mask,
                 "target_truth":padded_tgts_truth,
                 "target_start":padding_target_start,

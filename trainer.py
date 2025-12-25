@@ -34,10 +34,46 @@ class Trainer():
 
         self.device = torch.device(
             "cuda" if torch.cuda.is_available() else "cpu")
-        self.total_loss = TotalLoss(trainer_config=trainer_config)
+        self.class_weights = self.calculate_class_weights(self.train_data_loader,
+                                                          trainer_config.knowns + trainer_config.K,
+                                                          self.device)
+        
+        self.total_loss = TotalLoss(trainer_config=trainer_config,class_weights = self.class_weights)
 
         self.evaluator = TestDataEvaluation(self.test_data_loader)
+        
 
+    def calculate_class_weights(self, dataloader, num_classes, device):
+        print("Berechne Class Weights über das ganze Dataset...")
+        
+        counts = torch.zeros(num_classes, dtype=torch.long)
+        
+        for batch in dataloader:
+          
+            targets = batch["target_truth"]
+            
+            targets_flat = targets.flatten()
+            
+           
+            mask = (targets_flat >= 0) & (targets_flat < num_classes)
+            valid_targets = targets_flat[mask]
+            
+            if valid_targets.numel() > 0:
+                batch_counts = torch.bincount(valid_targets, minlength=num_classes)
+                counts += batch_counts
+
+        counts = counts.float() +1
+        
+        total_samples = counts.sum()
+        
+        weights = total_samples / counts
+        
+    
+        weights[self.config.knowns:] = 1.0
+        weights = weights / weights.mean()
+        
+        print(f"Absolute weights: {weights} {total_samples}")
+        return weights.to(device)
     def add_model(self, model):
         self.model = model
         self.model.to(self.device)
@@ -52,12 +88,12 @@ class Trainer():
         )
         config = vars(self.config) | vars(self.model_config)
 
-        """self.run = wandb.init(
+        self.run = wandb.init(
             project="ActionBERT",
-            name="strong-cosine",
+            name="gated-fusion-test ",
             config=config
         )
-        wandb.define_metric("eval/*", step_metric="epoch")"""
+        wandb.define_metric("eval/*", step_metric="epoch")
 
     def _generate_structured_mask(self, features, mask_ratio=0.75, block_size=64):
         """
@@ -97,11 +133,14 @@ class Trainer():
         for epoch in range(self.config.num_epochs):
             self.model.train()
             for batch in self.train_data_loader:
+
                 features = batch["features"].to(self.device)
 
                 unknown_mask = batch["unknown_mask"].to(self.device)
+                foreground_mask = batch["foreground_mask"].to(self.device)
                 target_truth = batch["target_truth"].to(self.device)
                 padding_mask = batch["padding_mask"].to(self.device)
+                
                 padding_target_start = batch["target_start"].to(self.device)
                 padding_target_end = batch["target_end"].to(self.device)
 
@@ -110,7 +149,7 @@ class Trainer():
                                                             block_size=self.config.block_size,)
 
                 patch_mask = patch_mask & (padding_mask.bool())
-
+               
                 self.model.train()
                 recon_feat, class_logits, embeddings = self.model(
                     features, patch_mask=patch_mask, padding_mask=padding_mask)
@@ -121,9 +160,11 @@ class Trainer():
                                        recon_features=recon_feat,
                                        target_features=features,
                                        unknown_mask=unknown_mask,
+                                       foreground_mask=foreground_mask & padding_mask,
                                        known_mask=~unknown_mask & padding_mask,
                                        patch_mask=patch_mask,
-                                       padding_mask=padding_mask)
+                                       padding_mask=padding_mask,
+                                       epoch=epoch)
                 wandb.log({
                     "epoch": epoch,
                 })

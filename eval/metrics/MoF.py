@@ -2,7 +2,7 @@ from typing import Iterable, Union
 import torch
 import numpy as np
 
-class MoFAccuracyMetric():
+class MacroMoFAccuracyMetric():
     def __init__(self, ignore_ids: Iterable[int] = (), window_size:  int = 1):
         self.ignore_ids = ignore_ids
 
@@ -34,7 +34,7 @@ class MoFAccuracyMetric():
         masks = np.logical_not(np.isin(targets, self.ignore_ids))
         current_total = masks.sum()
         current_correct = (targets == predictions)[masks].sum()
-        current_result = MoFAccuracyMetric.careful_divide(current_correct, current_total)
+        current_result = MacroMoFAccuracyMetric.careful_divide(current_correct, current_total)
         self.correct += current_correct
         self.total += current_total
         #self.deque.append(current_result)
@@ -42,7 +42,7 @@ class MoFAccuracyMetric():
         return current_result
 
     def summary(self) -> float:
-        return MoFAccuracyMetric.careful_divide(self.correct, self.total)
+        return MacroMoFAccuracyMetric.careful_divide(self.correct, self.total)
 
     def name(self) -> str:
         if self.ignore_ids:

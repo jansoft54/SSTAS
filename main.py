@@ -3,12 +3,11 @@ from trainer import Trainer
 from trainer_config import TrainerConfig
 
 
+
 import random
 import os
 import numpy as np
 import torch
-import os
-os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 
 def set_deterministic(seed=42):
@@ -42,7 +41,7 @@ trainer_config = TrainerConfig(
     unknowns=unknowns,
     K=prototypes,
     batch_size=1,
-    num_epochs=60,
+    num_epochs=35,
     output_name="actionbert_second_try"
 )
 bert_conf = ActionBERTConfig(

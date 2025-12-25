@@ -5,6 +5,8 @@ from trainer_config import TrainerConfig
 import wandb
 
 
+
+
 class PIMLoss(nn.Module):
     def __init__(self, l=0.2, momentum=0.9, eps=1e-8, known_classes=5, num_classes=10, device=None):
         super().__init__()
@@ -74,6 +76,79 @@ class PIMLoss(nn.Module):
         return loss_ce_known
 
 
+class InfoNCELoss(nn.Module):
+    def __init__(self, temperature=0.07, max_samples=1000, start=0):
+        """
+        temperature: Wie "streng" die Cluster sein sollen. 0.07 ist Standard.
+        max_samples: Wie viele Frames maximal verglichen werden (Spart GPU Speicher).
+        """
+        super().__init__()
+        self.temperature = temperature
+        self.max_samples = max_samples
+        self.start = start
+
+    def forward(self, embeddings, labels, known_mask, epoch):
+        """
+        embeddings: [N, Dim] (Die Features aus ActionBERT)
+        labels: [N] (Die Klassen-IDs, z.B. 0, 1, 2...)
+        """
+        device = embeddings.device
+
+        if epoch < self.start:
+            return torch.tensor(0, device=device)
+
+        valid_indices = known_mask.bool()
+
+        embeddings = embeddings[valid_indices]
+        labels = labels[valid_indices]
+
+        N = embeddings.shape[0]
+
+        if N > self.max_samples:
+            indices = torch.randperm(N, device=device)[:self.max_samples]
+
+            embeddings = embeddings[indices]
+
+            labels = labels[indices]
+            N = self.max_samples
+
+        embeddings = F.normalize(embeddings, dim=1)
+
+        similarity_matrix = torch.matmul(embeddings, embeddings.T)
+
+        labels = labels.view(-1, 1)
+
+        mask = torch.eq(labels, labels.T).float()
+
+        logits_mask = torch.scatter(
+            torch.ones_like(mask),
+            1,
+            torch.arange(N).view(-1, 1).to(device),
+            0
+        )
+        mask = mask * logits_mask
+        logits = similarity_matrix / self.temperature
+
+        logits_max, _ = torch.max(logits, dim=1, keepdim=True)
+        logits = logits - logits_max.detach()
+
+        exp_logits = torch.exp(logits) * logits_mask
+        log_prob_denom = torch.log(exp_logits.sum(1, keepdim=True) + 1e-8)
+
+        log_prob = logits - log_prob_denom
+
+        mean_log_prob_pos = (mask * log_prob).sum(1) / (mask.sum(1) + 1e-8)
+
+        loss = -mean_log_prob_pos
+
+        loss = loss[mask.sum(1) > 0].mean()
+
+        if torch.isnan(loss):
+            return torch.tensor(0.0, device=device)
+
+        return loss
+
+
 class ReconLoss(nn.Module):
     def __init__(self, trainer_config: TrainerConfig):
         super().__init__()
@@ -119,100 +194,72 @@ class TemporalSmoothnessLoss(nn.Module):
         return loss
 
 
-class InfoNCELoss(nn.Module):
-    def __init__(self, temperature=0.07, max_samples=1000):
-        """
-        temperature: Wie "streng" die Cluster sein sollen. 0.07 ist Standard.
-        max_samples: Wie viele Frames maximal verglichen werden (Spart GPU Speicher).
-        """
+class SimpleCompactnessLoss(nn.Module):
+    def __init__(self, start):
         super().__init__()
-        self.temperature = temperature
-        self.max_samples = max_samples
+        self.start = start
 
-    def forward(self, embeddings, labels, known_mask):
+    def forward(self, embeddings, labels, epoch):
         """
-        embeddings: [N, Dim] (Die Features aus ActionBERT)
-        labels: [N] (Die Klassen-IDs, z.B. 0, 1, 2...)
+        Zieht Embeddings der gleichen Klasse im aktuellen Batch zusammen.
         """
-        device = embeddings.device
+        if epoch < self.start:
+            return 0
+        unique_labels = torch.unique(labels)
+        loss = 0.0
+        valid_classes = 0
 
-        B, N, D = embeddings.shape
-        valid_indices = known_mask.bool()
+        embeddings = F.normalize(embeddings, dim=-1)
 
-        embeddings = embeddings[valid_indices]
-        labels = labels[valid_indices]
+        for label in unique_labels:
 
-        embeddings = embeddings.flatten(0, 1)
-        labels = labels.flatten(0, 1)
-        if N > self.max_samples:
-            indices = torch.randperm(B*N)[:self.max_samples]
-            print(embeddings.shape, labels.shape, indices.shape)
+            mask = (labels == label)
 
-            embeddings = embeddings[indices]
+            class_feats = embeddings[mask]
 
-            labels = labels[indices]
-            N = self.max_samples
+            if class_feats.shape[0] > 1:
+                center = class_feats.mean(dim=0, keepdim=True)
+                center = F.normalize(center, dim=1)
+                sim = torch.mm(class_feats, center.t())
 
-        print(embeddings.shape, labels.shape)
+                class_loss = (1.0 - sim).mean()
 
-        embeddings = F.normalize(embeddings, dim=1)
+                loss += class_loss
+                valid_classes += 1
 
-        similarity_matrix = torch.matmul(embeddings, embeddings.T)
+        if valid_classes > 0:
+            return loss / valid_classes
+        else:
+            return torch.tensor(0.0, device=embeddings.device, requires_grad=True)
 
-        # 4. MASKEN BAUEN
-        # Wo haben zwei Frames das GLEICHE Label? (Positive Paare)
-        labels = labels.view(-1, 1)
 
-        # mask[i, j] ist 1, wenn label[i] == label[j]
-        mask = torch.eq(labels, labels.T).float()
+class FocalLoss(nn.Module):
+    def __init__(self, gamma=2.0, alpha=None, reduction='mean'):
 
-        # Diagonale entfernen (Ein Frame ist immer ähnlich zu sich selbst, das zählt nicht)
-        logits_mask = torch.scatter(
-            torch.ones_like(mask),
-            1,
-            torch.arange(N).view(-1, 1).to(device),
-            0
-        )
-        mask = mask * logits_mask  # Das sind unsere "echten" Partner
+        super().__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+        self.reduction = reduction
 
-        # 5. INFONCE BERECHNUNG (Log-Sum-Exp Trick für Stabilität)
+    def forward(self, inputs, targets):
+        
+      #  print(inputs.shape,targets.shape)
+        ce_loss = F.cross_entropy(
+            inputs, targets,  weight=self.alpha)
 
-        # Temperatur anwenden
-        logits = similarity_matrix / self.temperature
+        return ce_loss
+        pt = torch.exp(-ce_loss)
 
-        # Max abziehen für numerische Stabilität (verhindert Overflow bei exp)
-        logits_max, _ = torch.max(logits, dim=1, keepdim=True)
-        logits = logits - logits_max.detach()
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
 
-        # Nenner berechnen: Summe aller exp(logits) außer sich selbst
-        exp_logits = torch.exp(logits) * logits_mask
-        log_prob_denom = torch.log(exp_logits.sum(1, keepdim=True) + 1e-8)
-
-        print(exp_logits.shape, log_prob_denom.shape)
-        # Log-Wahrscheinlichkeit: Zähler (logits) - Nenner (log_sum_exp)
-        log_prob = logits - log_prob_denom
-
-        # Durchschnitt über alle POSITIVEN Partner berechnen
-        # (mask * log_prob).sum(1) summiert nur die Werte, wo das Label gleich ist
-        # Wir teilen durch die Anzahl der Partner (mask.sum(1))
-        # 1e-8 verhindert Division durch 0, falls ein Frame gar keinen Partner hat
-        mean_log_prob_pos = (mask * log_prob).sum(1) / (mask.sum(1) + 1e-8)
-
-        # Loss ist negativ (wir wollen maximieren)
-        loss = -mean_log_prob_pos
-
-        # Nur über Frames mitteln, die auch wirklich Partner hatten
-        loss = loss[mask.sum(1) > 0].mean()
-
-        # Falls gar keine Partner da waren (passiert selten), return 0
-        if torch.isnan(loss):
-            return torch.tensor(0.0, device=device)
-
-        return loss
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        else:
+            return focal_loss.sum()
 
 
 class TotalLoss(nn.Module):
-    def __init__(self, trainer_config: TrainerConfig):
+    def __init__(self, trainer_config: TrainerConfig, class_weights):
         super().__init__()
         self.device = torch.device(
             "cuda" if torch.cuda.is_available() else "cpu")
@@ -222,15 +269,18 @@ class TotalLoss(nn.Module):
                                 known_classes=trainer_config.knowns,
                                 num_classes=trainer_config.knowns + trainer_config.K,
                                 device=self.device)
+        self.focal_loss = FocalLoss(alpha=None)
         self.recon_loss = ReconLoss(trainer_config=trainer_config)
         self.smooth_loss = TemporalSmoothnessLoss(
             trainer_config=trainer_config)
-        self.info_contrastive_loss = InfoNCELoss(
-            temperature=0.07, max_samples=1000)
+        self.info_contrastive_loss = SimpleCompactnessLoss(start=trainer_config.info_start)
 
         self.pim_weight = trainer_config.pim_loss_weight
         self.recon_weight = trainer_config.recon_loss_weight
         self.smooth_weight = trainer_config.smooth_loss_weight
+        self.info_nce_weight = trainer_config.info_nce_weight
+
+        self.class_weights= class_weights
 
     def forward(self, logits,
                 embeddings,
@@ -238,33 +288,42 @@ class TotalLoss(nn.Module):
                 recon_features,
                 target_features,
                 unknown_mask,
+                foreground_mask,
                 known_mask,
                 patch_mask,
-                padding_mask):
+                padding_mask,
+                epoch):
 
         zero = torch.tensor(0.0, device=self.device)
-        loss_pim = self.pim_loss(
-            logits, target_labels, unknown_mask, known_mask) if self.pim_weight > 0 else zero
+        """loss_pim = self.pim_loss(
+            logits, target_labels, unknown_mask, known_mask) if self.pim_weight > 0 else zero"""
+
+        
+        loss_focal = self.focal_loss(
+            logits[known_mask], target_labels[known_mask])
         loss_recon = self.recon_loss(
-            recon_features, target_features, patch_mask) if self.recon_weight > 0 else zero
+            recon_features, target_features, patch_mask ) if self.recon_weight > 0 else zero
         loss_smooth = self.smooth_loss(
             logits, padding_mask) if self.smooth_weight > 0 else zero
         loss_info_nce = self.info_contrastive_loss(
-            embeddings, target_labels, known_mask)
+            embeddings[known_mask], target_labels[known_mask], epoch) if self.info_nce_weight > 0 else zero
 
-        total_loss = (self.pim_weight * loss_pim +
+        total_loss = (self.pim_weight * loss_focal +
                       self.recon_weight * loss_recon +
-                      self.smooth_weight * loss_smooth)
+                      self.smooth_weight * loss_smooth +
+                      self.info_nce_weight * loss_info_nce)
+
         """boundary_loss = self.l1(boundaries[:,:,0][~unknown_mask & padding_mask], padding_target_start[~unknown_mask & padding_mask].float()) + self.l1(boundaries[:,:,1][~unknown_mask & padding_mask], padding_target_end[~unknown_mask & padding_mask].float())
                 """
 
         wandb.log({
-            "train/CE Loss (Knowns)": loss_pim,
+            "train/CE Loss (Knowns)": loss_focal,
             "train/Recon Loss": loss_recon,
             "train/Smoothness Loss": loss_smooth,
+            "train/Prototype Contrastive Loss": loss_info_nce,
             "train/Total Loss": total_loss,
         })
-        print(total_loss.item(), f"PIM: {loss_pim}",
+        print(total_loss.item(), f"PIM: {loss_focal}",
               f"Cos: {loss_recon}", f"Smooth: {loss_smooth}")
 
         return total_loss

@@ -2,7 +2,7 @@
 from pathlib import Path
 from eval.metrics.F1Score import F1Score
 from eval.metrics.Edit import Edit
-from eval.metrics.MoF import MoFAccuracyMetric
+from eval.metrics.MoF import MacroMoFAccuracyMetric
 import torch
 from scipy.optimize import linear_sum_assignment
 
@@ -77,6 +77,11 @@ class Evaluator():
     def _eval(self,model_pred, ground_truth,padding_mask,unknown_ids,num_classes):
         
         
+    #    print(model_pred)
+     #   print(ground_truth)
+        print(model_pred.shape, ground_truth.shape,)
+
+        model_pred[~padding_mask] = -100
         unknown_ids_list = list(unknown_ids)
         ignore_list = unknown_ids_list + [-100] 
         
@@ -87,7 +92,7 @@ class Evaluator():
         gt_prepared[~padding_mask] = -100
         pred_prepared[~padding_mask] = -100
         
-        mof_metric = MoFAccuracyMetric(ignore_ids=ignore_list)
+        mof_metric = MacroMoFAccuracyMetric(ignore_ids=ignore_list)
         edit_metric = Edit(ignore_ids=ignore_list)
         f1_metric = F1Score(num_classes=num_classes,ignore_ids=ignore_list)
    
