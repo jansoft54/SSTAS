@@ -8,12 +8,14 @@ import torch.nn.functional as F
 knowns = 14
 unknowns = 5
 
-class TestDataEvaluation:
-    def __init__(self,dataloader):
+class DataEvaluation:
+    def __init__(self,dataloader,train=False):
         self.loader = dataloader
+        self.train = train
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-    def eval(self,model,epoch):
+    def eval(self,model,epoch,console_log=False):
+        
         model.eval()
         model = model.to(self.device)
         with torch.no_grad(): 
@@ -30,8 +32,10 @@ class TestDataEvaluation:
         
         
                     
-                recon_feat, class_logits, boundaries= model(features, None, padding_mask)
-                softmax_logits = F.softmax(class_logits, dim=-1)  
+                result =  model(features, None, padding_mask)
+                
+                
+                softmax_logits = F.softmax(result["refine_logits"], dim=-1)  
                 class_labels = torch.argmax(softmax_logits,dim=-1).cpu()
                 target_truth = target_truth.cpu()
                 padding_mask = padding_mask.cpu()
@@ -40,6 +44,7 @@ class TestDataEvaluation:
                 evaluator = Evaluator(evaluation_name="Evaluation",
                                     dataset="50salads",
                                     default_path="./data/data/",
+                                    train=self.train,
                                     known_classes=knowns,
                                     unkown_classes=unknowns)
                 known_pref, unkown_perf =  evaluator.evaluate(model_pred=class_labels,
@@ -49,8 +54,13 @@ class TestDataEvaluation:
             
                 known_pref["epoch"] = (epoch)
                 unkown_perf["epoch"] = (epoch)
-                import wandb
-                wandb.log(known_pref)
+                if console_log:
+                    print(known_pref)
+                else:
+                    
+                    import wandb
+                    wandb.log(known_pref)
+                break
         
 
 

@@ -4,6 +4,8 @@ from trainer_config import TrainerConfig
 
 
 
+
+
 import random
 import os
 import numpy as np
@@ -33,7 +35,7 @@ set_deterministic(42)
 
 knowns = 14
 unknowns = 5
-prototypes = 30
+prototypes = 0
 
 trainer_config = TrainerConfig(
     train_split="train.split1.bundle",
@@ -41,18 +43,18 @@ trainer_config = TrainerConfig(
     unknowns=unknowns,
     K=prototypes,
     batch_size=1,
-    num_epochs=35,
+    num_epochs=65,
     output_name="actionbert_second_try"
 )
 bert_conf = ActionBERTConfig(
     total_classes=knowns + prototypes,
     input_dim=2048,
-    d_model=256,
+    d_model=128,
     num_heads=8,
     num_layers=4,
     local_window_size=128,
     window_dilation=32,
-    dropout=0.1)
+    dropout=0)
 model = ActionBERT(config=bert_conf)
 
 trainer = Trainer(trainer_config=trainer_config, model_config=bert_conf)

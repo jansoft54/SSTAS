@@ -1,3 +1,4 @@
+from model.util import SingleStageTCN
 import torch
 import numpy as np
 
@@ -132,14 +133,45 @@ class MaskingModule(nn.Module):
         self.mask_token = nn.Parameter(torch.randn(1, 1, model_dim) * 0.02)
 
     def forward(self, features, mask):
-        features_masked = features.clone()
-        token = self.mask_token.type_as(features_masked)
+        """
+        features: [B, T, D]
+        mask: [B, T] BoolTensor (True = Position wurde zum Maskieren ausgewählt)
+        """
+        # Wir arbeiten auf einer Kopie, damit das Original für den Loss erhalten bleibt
+        out = features.clone()
 
-        if mask != None:
-            features_masked[mask] = token.squeeze()
-        return features_masked
+        if mask is None:
+            return out
 
+        # Zufallszahlen für jede Position im Batch generieren [B, T]
+        probs = torch.rand(features.shape[:2], device=features.device)
 
+        # --- FALL 1: 80% -> [MASK] Token ---
+        # Wo maskiert werden soll UND Zufall < 0.8
+        replace_mask = mask & (probs < 0.8)
+        
+        # Wir müssen den Token in die richtige Form broadcasten
+        # token: [1, 1, D] -> wird automatisch auf [N_replace, D] broadcasted
+        out[replace_mask] = self.mask_token.type_as(out)
+
+        # --- FALL 2: 10% -> Random Noise ---
+        # Wo maskiert werden soll UND 0.8 <= Zufall < 0.9
+        random_mask = mask & (probs >= 0.8) & (probs < 0.9)
+        
+        # Erstelle Rauschen mit der gleichen Statistik (Mean/Std) wie die Features
+        # Oder einfach Standard-Normalverteilung (oft gut genug bei LayerNorm)
+        noise = torch.randn_like(features[random_mask])
+        out[random_mask] = noise
+
+        # --- FALL 3: 10% -> Original behalten (Identity) ---
+        # Wo maskiert werden soll UND Zufall >= 0.9
+        # Da wir 'out' als Klon von 'features' gestartet haben, 
+        # steht hier automatisch schon das Original drin. 
+        # Wir müssen also nichts tun!
+        
+        return out
+
+"""
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=20000):
         super().__init__()
@@ -159,7 +191,7 @@ class PositionalEncoding(nn.Module):
         T = x.size(1)
 
         return x + self.pe[:T].unsqueeze(0)
-
+"""
 
 class LocalAttention(nn.Module):
     def __init__(self, config: ActionBERTConfig, local_window_size=64):
@@ -169,76 +201,56 @@ class LocalAttention(nn.Module):
         self.norm = nn.LayerNorm(config.d_model)
         self.dropout = nn.Dropout(config.dropout)
         self.rotary_mha = RotaryMHA(config=config)
+        self.local_rope = RotaryEmbedding(config.d_model // config.num_heads)
+
 
     def create_windows(self, x, padding_mask, cos, sin):
         B, T, C = x.shape
         W = self.local_window_size
 
-        cos_t = cos.squeeze(0).squeeze(0)
-        sin_t = sin.squeeze(0).squeeze(0)
-        
-        cos_t = cos_t.unsqueeze(0).expand(B, -1, -1)
-        sin_t = sin_t.unsqueeze(0).expand(B, -1, -1)
-        cos_t = cos_t.contiguous() 
-        sin_t = sin_t.contiguous()
+    
         pad_end = (W - (T % W)) % W
         clean_mask = padding_mask.unsqueeze(-1).type_as(x)
         x = x * clean_mask
-        cos_t = cos_t * clean_mask
-        sin_t = sin_t *clean_mask
 
+   
         if pad_end > 0:
             x_padded = F.pad(x, (0, 0, 0, pad_end))
-           
-
+        
             padding_mask_padded = F.pad(
                 padding_mask, (0, pad_end), value=False)
 
-            cos_padded = F.pad(cos_t, (0, 0, 0, pad_end))
-            sin_padded = F.pad(sin_t, (0, 0, 0, pad_end))
         else:
             x_padded = x
             padding_mask_padded = padding_mask
-            cos_padded = cos_t
-            sin_padded = sin_t
-            
-
-       # print("hi",x_padded.shape,x_padded.shape)
-
-        
         
         q_windows = x_padded.unfold(1, W, W).permute(
             0, 1, 3, 2).reshape(-1, W, C)
 
 
-        cos_q = cos_padded.unfold(1, W, W).permute(
+        """ cos_q = cos_padded.unfold(1, W, W).permute(
             0, 1, 3, 2).reshape(-1, W, cos_padded.shape[-1]).unsqueeze(1)
-        
+        """
 
-        sin_q = sin_padded.unfold(1, W, W).permute(
+        """ sin_q = sin_padded.unfold(1, W, W).permute(
             0, 1, 3, 2).reshape(-1, W, sin_padded.shape[-1]).unsqueeze(1)
-        
+        """
 
         half_pad = W // 2
         x_context = F.pad(x_padded, (0, 0, half_pad, half_pad))
 
-        cos_context = F.pad(cos_padded, (0, 0, half_pad, half_pad))
-        sin_context = F.pad(sin_padded, (0, 0, half_pad, half_pad))
-
         k_windows = x_context.unfold(
             1, 2*W, W).permute(0, 1, 3, 2).reshape(-1, 2*W, C)
+        
+        cos_k, sin_k = self.local_rope(k_windows, seq_len=2*W)
+        cos_q = cos_k[:, :, half_pad : half_pad + W, :]
+        sin_q = sin_k[:, :, half_pad : half_pad + W, :]
         
 
         padding_mask_k = F.pad(padding_mask_padded,
                                (half_pad, half_pad), value=False)
         padding_mask_k = padding_mask_k.unfold(1, 2*W, W).reshape(-1, 2*W)
 
-        cos_k = cos_context.unfold(
-            1, 2*W, W).permute(0, 1, 3, 2).reshape(-1, 2*W, cos_padded.shape[-1]).unsqueeze(1)
-        sin_k = sin_context.unfold(
-            1, 2*W, W).permute(0, 1, 3, 2).reshape(-1, 2*W, sin_padded.shape[-1]).unsqueeze(1)
-
-      
 
         q = q_windows
         k = k_windows
@@ -251,17 +263,8 @@ class LocalAttention(nn.Module):
         q, k, pk, cos_q, sin_q, cos_k, sin_k = self.create_windows(
             x, padding_mask=padding_mask, cos=cos, sin=sin)
         v = k
-       
-        """
-        addBreakpoint("1",q)
-        addBreakpoint("2",k)
-        addBreakpoint("3",pk.float())
-        addBreakpoint("4",cos_q)
-        addBreakpoint("5",sin_q)
-        addBreakpoint("6",cos_k)
-        addBreakpoint("7",sin_k)"""
-        
-        
+      
+      
         
         attn_mask = pk.clone() 
         rows_with_no_data = ~attn_mask.any(dim=-1)
@@ -293,7 +296,8 @@ class GlobalAttention(nn.Module):
         self.norm = nn.LayerNorm(config.d_model)
         self.dropout = nn.Dropout(config.dropout)
         self.window_dilation = window_dilation
-
+        self.global_rope = RotaryEmbedding(config.d_model // config.num_heads,)
+        
     def create_windows(self, x, padding_mask, cos, sin):
         B, T, C = x.shape
         W = self.window_dilation
@@ -317,6 +321,8 @@ class GlobalAttention(nn.Module):
 
         windows = x_padded.unfold(1, W, W).permute(0, 3, 1, 2).contiguous()
         windows = windows.flatten(0, 1)
+        seq_len_global = windows.shape[1]
+        cos_new, sin_new = self.global_rope(windows, seq_len=seq_len_global)
 
         padding_mask_padded = padding_mask_padded.unfold(
             1, W, W).transpose(1, 2).contiguous()
@@ -332,7 +338,7 @@ class GlobalAttention(nn.Module):
 
         q, k, v = windows, windows, windows
         pk = padding_mask_padded
-        return q, k, v, pk, cos_windows, sin_windows
+        return q, k, v, pk, cos_new, sin_new
 
     def forward(self, x, padding_mask, cos=None, sin=None):
         B, T, C = x.shape
@@ -365,12 +371,9 @@ class GatedFusion(nn.Module):
     
         
         self.gate_net = nn.Sequential(
-            nn.Linear(d_model * 2, d_model),
-            nn.GELU(), 
-            
-            nn.Linear(d_model, d_model),
-            
-            # 3. Sigmoid für 0..1 Range
+            nn.Linear(d_model * 2, d_model),   
+            nn.GELU(),
+            nn.Linear(d_model, d_model),            
             nn.Sigmoid() 
         )
         self.out_norm = nn.LayerNorm(d_model)
@@ -381,11 +384,30 @@ class GatedFusion(nn.Module):
         alpha = self.gate_net(combined)
         
      
-        fused = (alpha * x_local) + ((1 - alpha) * x_global)
+        fused =  alpha * x_global
         
         return self.out_norm(fused)
+    
+    
+class RefinementBlock(nn.Module):
+    def __init__(self, config, num_layers=8):
+        super().__init__()
+        self.refiner = SingleStageTCN(
+            in_channel=config.total_classes, 
+            n_features=64, 
+            n_classes=config.total_classes, 
+            n_layers=num_layers
+        )
+
+    def forward(self, logits, mask):
+        s2_input = F.softmax(logits, dim=-1).transpose(1, 2)
+        m = mask.unsqueeze(1).type_as(s2_input)        
+        s2_input = s2_input * m
+        logits_raw = self.refiner(s2_input)
+        return logits_raw.transpose(1, 2)
+    
 class Block(nn.Module):
-    def __init__(self, config: ActionBERTConfig):
+    def __init__(self, config: ActionBERTConfig,dilation=1):
         super().__init__()
         self.local_attn = LocalAttention(
             config=config, local_window_size=config.local_window_size)
@@ -396,34 +418,40 @@ class Block(nn.Module):
         self.norm2 = nn.LayerNorm(config.d_model)
         self.norm3 = nn.LayerNorm(config.d_model)
         self.dropout = nn.Dropout(config.dropout)
-        self.gated_fusion = GatedFusion(d_model=config.d_model)
         
         self.ffn = nn.Sequential(
-            nn.Linear(config.d_model, config.d_model * 4),
+            nn.Linear(config.d_model, config.d_model *2),
             nn.GELU(),
-            nn.Linear(config.d_model * 4, config.d_model),
+            nn.Linear(config.d_model*2, config.d_model *2 ),
+            nn.GELU(),
+            nn.Linear(config.d_model*2, config.d_model  ),
+          
         )
+       
 
     def forward(self, x, padding_mask, cos=None, sin=None):
         """
         x: [B, T, D]
         """
-        resid = x
-        x_norm_local = self.norm1(x)
-        local_out = self.local_attn(x_norm_local, padding_mask, cos, sin)
+        B, T, D = x.shape
+        mask = padding_mask.unsqueeze(-1).type_as(x)
+        x = x * mask 
         
-      #  x = resid + self.dropout(local_out)
-        x_norm_global = self.norm2(x)
-        global_out = self.global_attn(x_norm_global, padding_mask, cos, sin)
-        fused_attn = self.gated_fusion(local_out, global_out)
-        x = resid + self.dropout(fused_attn)
+        resid = x        
+        x_norm = self.norm1(x)
+        local_out = self.local_attn(x_norm, padding_mask, cos, sin)
+        x = resid + local_out
         
-        #x = resid + self.dropout(global_out)
-
         resid = x
-        x_norm_ffn = self.norm3(x)
-        ffn_out = self.ffn(x_norm_ffn)
+        x_norm = self.norm2(x)
+        global_out = self.global_attn(x_norm, padding_mask, cos, sin)
+        x = resid + global_out 
+        
+        resid = x
+        x_norm = self.norm3(x)
+        ffn_out = self.ffn(x_norm)
         x = resid + self.dropout(ffn_out)
+        
         return x
 
 
@@ -433,8 +461,16 @@ class ActionBERT(nn.Module):
                  ):
         super().__init__()
         self.config = config
+       
         self.input_proj = nn.Linear(config.input_dim, config.d_model)
-        self.output_head = nn.Linear(config.d_model, config.input_dim)
+
+        
+        self.output_head = nn.Sequential(
+                            nn.Linear(config.d_model, config.d_model),
+                            nn.GELU(),
+                            nn.Linear(config.d_model, config.d_model)
+                        )
+        
         self.prototypes = nn.Linear(
             config.d_model, config.total_classes, bias=False)
         self.final_norm = nn.LayerNorm(config.d_model)
@@ -442,39 +478,57 @@ class ActionBERT(nn.Module):
         self.rotary_emb = RotaryEmbedding(config.d_model // config.num_heads)
         self.masking_module = MaskingModule(config.input_dim, config.d_model)
 
-        self.layers = nn.ModuleList([
-            Block(config)
-            for _ in range(config.num_layers)
+        self.stage_one_layers = nn.ModuleList([
+            Block(config,dilation=2**i)
+            for i in range(config.num_layers)
         ])
+        self.refinement_block = RefinementBlock(config,num_layers=12)
+
+        
+        self.register_buffer("class_centers", torch.zeros(config.total_classes, config.d_model))
+        self.register_buffer("centers_initialized", torch.zeros(config.total_classes, dtype=torch.bool))
+        self.center_momentum = 0.99
 
     def forward(self, x, patch_mask, padding_mask,_run_name=None):
         global _current_run_name
         _current_run_name = _run_name
         seq_len = x.shape[1]
         cos, sin = self.rotary_emb(x, seq_len=seq_len)
-      #  cos = torch.zeros_like(cos)
+       # cos = torch.zeros_like(cos)
        # sin = torch.zeros_like(sin)
         x = self.input_proj(x)
+        recon_target = x.detach()
        
-
-        x = self.masking_module(x, mask=patch_mask)
+        if self.training:
+            x = self.masking_module(x, mask=patch_mask)
        
-
-        mask_float = padding_mask.unsqueeze(-1).type_as(x)
-
-       # print(x[~padding_mask])
-        for layer in self.layers:
+        for layer in self.stage_one_layers:
             x = layer(x, padding_mask=padding_mask, cos=cos, sin=sin)
             
-        #    x = x * mask_float
-        #    print(x[~padding_mask])
+     
 
         x = self.final_norm(x)
-    #    x = x*mask_float
+       
+      
+        x_norm = F.normalize(x, p=2, dim=-1)
+        w_norm = F.normalize(self.prototypes.weight, p=2, dim=-1)
+        prototype_logits = torch.matmul(x_norm, w_norm.t()) # [B, T, NumClasses]
+
 
         recon_features = self.output_head(x)
-        prototype_logits = self.prototypes(x)
-        # = self.boundary_head(x)
-        return recon_features, prototype_logits, x
+        prototype_logits = prototype_logits * 16.0
+        
+        
+        refine_logits = prototype_logits
+        refine_logits = self.refinement_block(refine_logits,padding_mask)
+
+
+        result = {"recon_features":recon_features,
+                  "recon_target":recon_target,
+                  "prototype_logits":prototype_logits,
+                  "refine_logits":refine_logits,
+                  "embeddings":x
+                  }
+        return result
 
 

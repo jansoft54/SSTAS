@@ -1,6 +1,6 @@
 
 
-from eval.benchmark import TestDataEvaluation
+from eval.benchmark import DataEvaluation
 from loader.dataloader import VideoDataSet, VideoDataLoader
 from model.bert import ActionBERTConfig
 from model.loss import TotalLoss
@@ -8,6 +8,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 import torch
 from trainer_config import TrainerConfig
 import wandb
+import torch.nn.functional as F
 
 
 class Trainer():
@@ -34,14 +35,15 @@ class Trainer():
 
         self.device = torch.device(
             "cuda" if torch.cuda.is_available() else "cpu")
-        self.class_weights = self.calculate_class_weights(self.train_data_loader,
+        """self.class_weights = self.calculate_class_weights(self.train_data_loader,
                                                           trainer_config.knowns + trainer_config.K,
-                                                          self.device)
+                                                          self.device)"""
         
-        self.total_loss = TotalLoss(trainer_config=trainer_config,class_weights = self.class_weights)
+        self.total_loss = TotalLoss(trainer_config=trainer_config,class_weights = None)
 
-        self.evaluator = TestDataEvaluation(self.test_data_loader)
-        
+        self.test_evaluator = DataEvaluation(self.test_data_loader,train=False)
+        self.train_evaluator = DataEvaluation(self.train_data_loader,train=True)
+
 
     def calculate_class_weights(self, dataloader, num_classes, device):
         print("Berechne Class Weights über das ganze Dataset...")
@@ -53,7 +55,6 @@ class Trainer():
             targets = batch["target_truth"]
             
             targets_flat = targets.flatten()
-            
            
             mask = (targets_flat >= 0) & (targets_flat < num_classes)
             valid_targets = targets_flat[mask]
@@ -74,11 +75,14 @@ class Trainer():
         
         print(f"Absolute weights: {weights} {total_samples}")
         return weights.to(device)
+    
     def add_model(self, model):
         self.model = model
         self.model.to(self.device)
+        print(self.config.weight_decay)
         self.optim = torch.optim.AdamW(model.parameters(),
                                        lr=self.config.learning_rate,
+                                       weight_decay=self.config.weight_decay,
                                        eps=self.config.epsilon)
 
         self.scheduler = CosineAnnealingLR(
@@ -90,21 +94,38 @@ class Trainer():
 
         self.run = wandb.init(
             project="ActionBERT",
-            name="gated-fusion-test ",
+            name="NewTest",
             config=config
         )
-        wandb.define_metric("eval/*", step_metric="epoch")
-
+        wandb.define_metric("train-eval/*", step_metric="epoch")
+        wandb.define_metric("test-eval/*", step_metric="epoch")
+        
+    def update_centroids(self,model_out,target_truth,known_mask):
+        with torch.no_grad():
+            current_embs = model_out["embeddings"][known_mask] # Normalisierte Embeddings nutzen!
+            current_lbls = target_truth[known_mask]
+            
+            for c in range(self.config.knowns):
+                class_mask = (current_lbls == c)
+                if class_mask.any():
+                    batch_mean = current_embs[class_mask].mean(dim=0)
+                    batch_mean = F.normalize(batch_mean, p=2, dim=0)
+                    
+                    if not self.model.centers_initialized[c]:
+                        self.model.class_centers[c] = batch_mean
+                        self.model.centers_initialized[c] = True
+                    else:
+                        self.model.class_centers[c] = self.model.center_momentum * self.model.class_centers[c] + \
+                                                    (1 - self.model.center_momentum) * batch_mean
+                        self.model.class_centers[c] = F.normalize(self.model.class_centers[c], p=2, dim=0)
+                        
+                        
     def _generate_structured_mask(self, features, mask_ratio=0.75, block_size=64):
-        """
-        Structured Masking: Unterteilt das Video in Blöcke der Größe 'block_size'.
-        In JEDEM Block werden 'mask_ratio' Prozent maskiert.
-        Das verhindert riesige Lücken und garantiert eine gleichmäßige Schwierigkeit.
-        """
+        
+    
         B, S, D = features.size()
         mask = torch.zeros((B, S), dtype=torch.bool)
 
-        mask_len_per_block = int(block_size * mask_ratio)
 
         for t in range(0, S, block_size):
             end_t = min(t + block_size, S)
@@ -141,9 +162,7 @@ class Trainer():
                 target_truth = batch["target_truth"].to(self.device)
                 padding_mask = batch["padding_mask"].to(self.device)
                 
-                padding_target_start = batch["target_start"].to(self.device)
-                padding_target_end = batch["target_end"].to(self.device)
-
+           
                 patch_mask = self._generate_structured_mask(features,
                                                             mask_ratio=self.config.mask_ratio,
                                                             block_size=self.config.block_size,)
@@ -151,20 +170,29 @@ class Trainer():
                 patch_mask = patch_mask & (padding_mask.bool())
                
                 self.model.train()
-                recon_feat, class_logits, embeddings = self.model(
+                
+                result =  self.model(
                     features, patch_mask=patch_mask, padding_mask=padding_mask)
-
-                loss = self.total_loss(logits=class_logits,
-                                       embeddings=embeddings,
-                                       target_labels=target_truth,
-                                       recon_features=recon_feat,
-                                       target_features=features,
-                                       unknown_mask=unknown_mask,
-                                       foreground_mask=foreground_mask & padding_mask,
-                                       known_mask=~unknown_mask & padding_mask,
-                                       patch_mask=patch_mask,
-                                       padding_mask=padding_mask,
-                                       epoch=epoch)
+                
+                self.update_centroids(result,target_truth,~unknown_mask & padding_mask)
+                
+                
+                loss_inputs = {
+                        "logits": result["prototype_logits"],
+                        "embeddings": result["embeddings"],
+                        "target_labels": target_truth,
+                        "recon_features": result["recon_features"],
+                        "target_features": result["recon_target"],
+                        "centers": self.model.class_centers,
+                        "prototypes": self.model.prototypes.weight,
+                        "refine_logits":result["refine_logits"],
+                        "known_mask": (~unknown_mask) & padding_mask,
+                        "patch_mask": patch_mask,
+                        "padding_mask": padding_mask,
+                        "epoch": epoch,
+                    }
+                loss = self.total_loss(loss_inputs)
+                
                 wandb.log({
                     "epoch": epoch,
                 })
@@ -172,7 +200,9 @@ class Trainer():
                 loss.backward()
 
                 self.optim.step()
-            self.evaluator.eval(self.model, epoch)
+            self.test_evaluator.eval(self.model, epoch)
+            self.train_evaluator.eval(self.model, epoch)
+            
             print(
                 f"-------------------- Epoch {epoch+1}/{self.config.num_epochs} -------------------- ")
             self.scheduler.step()

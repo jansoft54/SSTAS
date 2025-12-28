@@ -61,6 +61,8 @@ class RotaryMHA(nn.Module):
         self.v_proj = nn.Linear(config.d_model, config.d_model)
 
         self.out_proj = nn.Linear(config.d_model, config.d_model)
+        self.dropout_p = config.dropout
+
 
     def forward(self, x_q, x_k, x_v, cos_q, sin_q, cos_k, sin_k, key_padding_mask=None):
         """
@@ -89,8 +91,10 @@ class RotaryMHA(nn.Module):
 
             attn_mask = key_padding_mask.view(B, 1, 1, T_k)            
             attn_mask = attn_mask.expand(-1, self.num_heads, T_q, -1)
+        
+        dropout_rate = self.dropout_p if self.training else 0.0
 
-        output = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        output = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=dropout_rate)
         
         output = output.transpose(1, 2).contiguous().view(B, T_q, self.d_model)
         return self.out_proj(output)

@@ -11,6 +11,7 @@ class Evaluator():
                  evaluation_name = "default_evaluation",
                  dataset:str ="50salads",
                  default_path="../data/data/",
+                 train=False,
                  known_classes:int =0,
                  unkown_classes:int =0):
         self.dataset = dataset
@@ -18,6 +19,7 @@ class Evaluator():
         self.known_classes = known_classes
         self.unkown_classes = unkown_classes
         self.evaluation_name = evaluation_name
+        self.train = train
         mapping_path = Path(f"{self.default_path}/{self.dataset}/mapping.txt")
         self.label_to_index = {}
         with open(mapping_path, "r", encoding="utf-8") as f:
@@ -74,23 +76,25 @@ class Evaluator():
         
         return pred_indices, targets_indices
     
-    def _eval(self,model_pred, ground_truth,padding_mask,unknown_ids,num_classes):
+    def _eval(self,model_pred, ground_truth,padding_mask,unknown_mask,num_classes):
         
         
-    #    print(model_pred)
-     #   print(ground_truth)
-        print(model_pred.shape, ground_truth.shape,)
-
-        model_pred[~padding_mask] = -100
-        unknown_ids_list = list(unknown_ids)
-        ignore_list = unknown_ids_list + [-100] 
-        
-       
+        prefix = "train-eval" if self.train else "test-eval"
         gt_prepared = ground_truth.clone()
         pred_prepared = model_pred.clone()
         
-        gt_prepared[~padding_mask] = -100
         pred_prepared[~padding_mask] = -100
+        gt_prepared[~padding_mask] = -100
+        
+        pred_prepared[unknown_mask] = self.known_classes
+        gt_prepared[unknown_mask] = self.known_classes
+        
+        ignore_list =[-100] 
+        
+       
+       
+        
+       
         
         mof_metric = MacroMoFAccuracyMetric(ignore_ids=ignore_list)
         edit_metric = Edit(ignore_ids=ignore_list)
@@ -102,11 +106,11 @@ class Evaluator():
         
         
         return {
-             "eval/mof": (mof_metric.summary() * 100),
-             "eval/edit": (edit_metric.summary()),
-             "eval/f1_10": (f1_metric.summary()["F1@10"]* 100),
-             "eval/f1_25": (f1_metric.summary()["F1@25"]* 100),
-             "eval/f1_50": (f1_metric.summary()["F1@50"]* 100)}
+             f"{prefix}/mof": (mof_metric.summary() * 100),
+             f"{prefix}/edit": (edit_metric.summary()),
+             f"{prefix}/f1_10": (f1_metric.summary()["F1@10"]* 100),
+             f"{prefix}/f1_25": (f1_metric.summary()["F1@25"]* 100),
+             f"{prefix}/f1_50": (f1_metric.summary()["F1@50"]* 100)}
         
         
         
@@ -115,8 +119,8 @@ class Evaluator():
         unknown_on_known = range(self.known_classes, self.known_classes + self.unkown_classes)
         unknown_on_unknown = range(self.known_classes)
 
-        unknown_perf = self._eval(model_pred, ground_truth,padding_mask,unknown_on_unknown,self.unkown_classes )
-        known_perf = self._eval(model_pred, ground_truth,padding_mask,unknown_on_known,self.known_classes)
+        unknown_perf = self._eval(model_pred, ground_truth,padding_mask,unknown_mask,self.unkown_classes )
+        known_perf = self._eval(model_pred, ground_truth,padding_mask,unknown_mask,self.known_classes)
 
         if print_results:
             self._print_results_table(known_perf,unknown_perf)

@@ -29,16 +29,6 @@ class F1Score():
         self.fn = np.zeros(shape)
         #self.deque.clear()
 
-    """def get_deque_median(self):
-        medians = {}
-        aggregate_scores = defaultdict(list)
-        for score_dict in self.deque:
-            for n, v in score_dict.items():
-                aggregate_scores[n].append(v)
-        for name, scores in aggregate_scores.items():
-            medians[name] = np.median(scores)
-        return medians
-    """
 
     def add(
             self,
@@ -64,7 +54,7 @@ class F1Score():
                     self.overlaps[s],
                     ignored_classes=self.ignore_ids,
                 )
-             
+               # print( self.tp.shape,self.tp[s])
                 self.tp[s] += tp1
                 self.fp[s] += fp1
                 self.fn[s] += fn1

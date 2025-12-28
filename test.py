@@ -1,4 +1,4 @@
-from eval.benchmark import TestDataEvaluation
+from eval.benchmark import DataEvaluation
 from loader.dataloader import VideoDataLoader, VideoDataSet
 from model.bert import ActionBERT, ActionBERTConfig
 import torch.nn.functional as F
@@ -24,5 +24,5 @@ print("Modell erfolgreich geladen.")
 
 data_set = VideoDataSet(dataset="50salads",split="test.split1.bundle",knowns=14,unknowns=5)
 loader = VideoDataLoader(data_set, batch_size=len(data_set), shuffle=True)
-test_eval = TestDataEvaluation(loader)
+test_eval = DataEvaluation(loader)
 test_eval.eval(model=model)

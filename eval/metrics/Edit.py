@@ -27,7 +27,6 @@ class Edit():
             target = target[mask]
             pred = pred[mask]
             """
-
             current_score = edit_score(
                 recognized=pred.tolist(),
                 ground_truth=target.tolist(),
