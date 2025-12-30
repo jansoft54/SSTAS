@@ -17,12 +17,12 @@ class TrainerConfig:
 
     learning_rate: float = 2e-4
     epsilon: float = 1e-8
-    weight_decay:float = 0.02
-    
+    weight_decay: float = 0.02
+
     num_epochs: int = 50
-    mask_ratio: float = 0.8
+    mask_ratio: float = 0  # 0.8
     block_size: int = 128
-    
+
     min_span: int = 32
     max_span: int = 64
 

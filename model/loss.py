@@ -5,8 +5,6 @@ from trainer_config import TrainerConfig
 import wandb
 
 
-
-
 class ReconLoss(nn.Module):
     def __init__(self, trainer_config: TrainerConfig):
         super().__init__()
@@ -41,21 +39,21 @@ class TemporalSmoothnessLoss(nn.Module):
         padding_mask: [B, T] (1 für Daten, 0 für Padding)
         """
         # 1. Log-Softmax über die KLASSEN (letzte Dimension)
-        # LTContext nutzt dim=1, weil dort C an Stelle 1 steht. 
+        # LTContext nutzt dim=1, weil dort C an Stelle 1 steht.
         # Bei dir ist es dim=-1 oder dim=2!
         p_log = F.log_softmax(p, dim=-1)
-        
+
         # 2. MSE zwischen t (1:) und t-1 (:-1)
         # Das .detach() am Vorgänger ist entscheidend für die Trägheit!
         loss = self.mse(p_log[:, 1:, :], p_log[:, :-1, :].detach())
-        
+
         # 3. Truncation (Kappen der Gradienten an echten Grenzen)
         loss = torch.clamp(loss, min=0, max=self.mse_clip_val)
-        
+
         # 4. Padding berücksichtigen
         # Die Maske muss um 1 Frame gekürzt werden, da wir Differenzen rechnen
         mask = padding_mask[:, 1:].unsqueeze(-1)
-        
+
         return (loss * mask).mean()
 
 
@@ -64,9 +62,9 @@ class CentroidContrastiveLoss(nn.Module):
         super().__init__()
         self.pull_weight = pull_weight
         self.push_weight = push_weight
-        self.margin = margin # Wie weit müssen andere Zentren mindestens weg sein?
+        self.margin = margin  # Wie weit müssen andere Zentren mindestens weg sein?
 
-    def forward(self, embeddings, targets, centers,prototypes, known_mask):
+    def forward(self, embeddings, targets, centers, prototypes, known_mask):
         """
         embeddings: [N, 256] (aus dem Transformer, normalisiert)
         targets: [N] (Ground Truth IDs)
@@ -80,9 +78,9 @@ class CentroidContrastiveLoss(nn.Module):
 
         emb = F.normalize(emb, p=2, dim=-1)
 
-        sim_matrix = torch.matmul(emb, centers.t()) 
+        sim_matrix = torch.matmul(emb, centers.t())
 
-        temp = 0.07 
+        temp = 0.07
         correct_sims = sim_matrix[torch.arange(emb.size(0)), lbl]
         pull_errors = 1.0 - correct_sims
         unique_labels = torch.unique(lbl)
@@ -92,28 +90,30 @@ class CentroidContrastiveLoss(nn.Module):
             class_pull_losses.append(pull_errors[mask].mean())
         loss_pull = torch.stack(class_pull_losses).mean()
 
-     
         scaled_sim_matrix = sim_matrix / temp
-        
+
         K = centers.size(0)
         mask_other = torch.ones_like(scaled_sim_matrix, dtype=torch.bool)
         mask_other[torch.arange(emb.size(0)), lbl] = False
-        
+
         class_push_losses = []
         for label in unique_labels:
             mask = (lbl == label)
             other_sims_for_class = scaled_sim_matrix[mask][mask_other[mask]]
-            push_err = torch.clamp(other_sims_for_class - self.margin/temp, min=0)
+            push_err = torch.clamp(
+                other_sims_for_class - self.margin/temp, min=0)
             if push_err.numel() > 0:
                 class_push_losses.append(push_err.mean())
-        
-        loss_push = torch.stack(class_push_losses).mean() if class_push_losses else torch.tensor(0.0).to(emb.device)
-        
+
+        loss_push = torch.stack(class_push_losses).mean(
+        ) if class_push_losses else torch.tensor(0.0).to(emb.device)
+
         w_norm = F.normalize(prototypes, p=2, dim=-1)
-        class_sim = torch.matmul(w_norm, w_norm.t()) 
+        class_sim = torch.matmul(w_norm, w_norm.t())
 
         K = w_norm.size(0)
-        loss_ortho = (class_sim - torch.eye(K).to(prototypes.device)).pow(2).mean()
+        loss_ortho = (
+            class_sim - torch.eye(K).to(prototypes.device)).pow(2).mean()
 
         wandb.log({
             "Contrastive LOSS loss_push": loss_pull,
@@ -122,6 +122,8 @@ class CentroidContrastiveLoss(nn.Module):
         })
 
         return (self.pull_weight * loss_pull) + (self.push_weight * loss_push) + 10.0 * loss_ortho
+
+
 class FocalLoss(nn.Module):
     def __init__(self, gamma=2.0, alpha=None, reduction='mean'):
 
@@ -130,13 +132,13 @@ class FocalLoss(nn.Module):
         self.alpha = alpha
         self.reduction = reduction
 
-    def forward(self, inputs, targets,mask):
-        
+    def forward(self, inputs, targets, mask):
+
       #  print(inputs.shape,targets.shape)
         inputs = inputs[mask]
         targets = targets[mask]
         ce_loss = F.cross_entropy(
-            inputs, targets,  weight=self.alpha,label_smoothing=0)
+            inputs, targets,  weight=self.alpha, label_smoothing=0)
 
         return ce_loss
         pt = torch.exp(-ce_loss)
@@ -148,34 +150,40 @@ class FocalLoss(nn.Module):
         else:
             return focal_loss.sum()
 
+
 class MulticlassDiceLoss(nn.Module):
     def __init__(self, smooth=1e-6):
         super().__init__()
         self.smooth = smooth
 
     def forward(self, logits, targets, combined_mask):
+
         probs = torch.softmax(logits, dim=-1)
-        C = logits.size(-1)
+
+        C = probs.size(-1)
         targets_safe = torch.clamp(targets, 0, C - 1)
 
         targets_one_hot = F.one_hot(targets_safe, num_classes=C).float()
-        
+
         m = combined_mask.unsqueeze(-1)
         probs = probs * m
         targets_one_hot = targets_one_hot * m
-        
+
         intersection = (probs * targets_one_hot).sum(dim=1)
         union = probs.sum(dim=1) + targets_one_hot.sum(dim=1)
-        
+
         dice = (2. * intersection + self.smooth) / (union + self.smooth)
         return 1. - dice.mean()
+
 
 class TotalLoss(nn.Module):
     def __init__(self, trainer_config: TrainerConfig, class_weights):
         super().__init__()
         self.device = torch.device(
             "cuda" if torch.cuda.is_available() else "cpu")
-   
+
+        self.bce_loss = nn.BCEWithLogitsLoss(pos_weight=None)
+
         self.focal_loss = FocalLoss(alpha=None)
         self.recon_loss = ReconLoss(trainer_config=trainer_config)
         self.smooth_loss = TemporalSmoothnessLoss(
@@ -185,19 +193,21 @@ class TotalLoss(nn.Module):
         self.ce_weight = trainer_config.pim_loss_weight
         self.recon_weight = trainer_config.recon_loss_weight
         self.smooth_weight = trainer_config.smooth_loss_weight
-       
 
-        self.class_weights= class_weights
+        self.class_weights = class_weights
 
-    def forward(self,loss_dict):
+    def forward(self, loss_dict):
 
         zero = torch.tensor(0.0, device=self.device)
         """loss_pim = self.pim_loss(
             logits, target_labels, unknown_mask, known_mask) if self.pim_weight > 0 else zero"""
         logits = loss_dict["logits"]
         refine_logits = loss_dict["refine_logits"]
-        
+        stage_output_logits = loss_dict["stages_output_logits"],
+
         known_mask = loss_dict["known_mask"]
+        unknown_mask = loss_dict["unknown_mask"]
+
         target_labels = loss_dict["target_labels"]
         recon_features = loss_dict["recon_features"]
         target_features = loss_dict["target_features"]
@@ -208,42 +218,65 @@ class TotalLoss(nn.Module):
         prototypes = loss_dict["prototypes"]
         epoch = loss_dict["epoch"]
 
-        loss_dice_stage_first = self.dice_loss(logits,target_labels, padding_mask & known_mask)
-        loss_focal_stage_first = self.focal_loss(logits,target_labels,padding_mask & known_mask)
-        loss_recon_stage_first = self.recon_loss(
-            recon_features, target_features, patch_mask)  if self.recon_weight > 0 else zero
-        
+        # S1 Unknown Detector
+        stages_output_unkown_logits = loss_dict["stages_output_unknown_logits"]
+
+        loss_dice_stage_first = self.dice_loss(
+            logits, target_labels, padding_mask & known_mask)
+        loss_focal_stage_first = self.focal_loss(
+            logits, target_labels, padding_mask & known_mask)
+        """loss_recon_stage_first = self.recon_loss(
+            recon_features, target_features, patch_mask) if self.recon_weight > 0 else zero"""
+
         loss_smooth_stage_first = self.smooth_loss(
             logits, padding_mask) if self.smooth_weight > 0 else zero
-        loss_smooth_stage_refine= self.smooth_loss(
-            refine_logits, padding_mask) if self.smooth_weight > 0 else zero
-        
-        loss_contrastive_stage_first = self.contrastive_loss(embeddings,target_labels,centers,prototypes,known_mask) if  epoch >= 15 else zero
-        loss_dice_stage_refine = self.dice_loss(refine_logits,target_labels, padding_mask & known_mask)
-        loss_focal_stage_refine = self.focal_loss(refine_logits,target_labels,padding_mask & known_mask)
+
+        loss_contrastive_stage_first = self.contrastive_loss(
+            embeddings, target_labels, centers, prototypes, known_mask) if epoch >= 15 else zero
+
+        loss_smooth_stage_refine = sum([self.smooth_loss(
+            refine_logits_, padding_mask) for _, refine_logits_ in enumerate(stage_output_logits[0])]) / len(stage_output_logits[0])
+
+        loss_dice_stage_refine = sum(
+            [self.dice_loss(refine_logits_, target_labels, padding_mask & known_mask) for _, refine_logits_ in enumerate(stage_output_logits[0])]) / len(stage_output_logits[0])
+
+        loss_focal_stage_refine = sum([self.focal_loss(
+            refine_logits_, target_labels, padding_mask & known_mask) for _, refine_logits_ in enumerate(stage_output_logits[0])]) / len(stage_output_logits[0])
+
+        loss_smooth_stage_unknowns = sum([self.smooth_loss(
+            u_logits.unsqueeze(0), padding_mask) for _, u_logits in enumerate(stages_output_unkown_logits[0])]) / len(stages_output_unkown_logits[0])
+
+        loss_dice_stage_unknowns = sum(
+            [self.dice_loss(u_logits.unsqueeze(0), unknown_mask.long(), padding_mask) for _, u_logits in enumerate(stages_output_unkown_logits[0])]) / len(stages_output_unkown_logits[0])
+
+        loss_focal_stage_unknowns = sum([self.focal_loss(
+            u_logits.unsqueeze(0), unknown_mask.long(), padding_mask) for _, u_logits in enumerate(stages_output_unkown_logits[0])]) / len(stages_output_unkown_logits[0])
 
         total_loss = (1 * loss_dice_stage_first +
-                      1 * loss_focal_stage_first+ 
-                      1 * loss_recon_stage_first +
-                      1 * loss_smooth_stage_first +
-                      1 * loss_contrastive_stage_first+
-                      1 * loss_dice_stage_refine + 
+                      1 * loss_focal_stage_first +
+                      # 0 * loss_recon_stage_first +
+                      # 0.1 * loss_smooth_stage_first +
+                      1 * loss_contrastive_stage_first +
+                      1 * loss_dice_stage_refine +
                       1 * loss_smooth_stage_refine +
-                      1 * loss_focal_stage_refine
-                     
-                      )
-                     # self.info_nce_weight * loss_info_nce
+                      1 * loss_focal_stage_refine +
 
-     
+                      1 * loss_smooth_stage_unknowns +
+                      1 * loss_dice_stage_unknowns +
+                      1 * loss_focal_stage_unknowns
+                      )
 
         wandb.log({
-            "train/Dice Loss (Knowns)": loss_dice_stage_first +loss_dice_stage_refine,
-            "train/Recon Loss": loss_recon_stage_first,
-            "train/Smoothness Loss": loss_smooth_stage_first,
+            "train/Dice Loss (Knowns)": loss_dice_stage_first + loss_dice_stage_refine,
+            "train/Smoothness Loss (Knowns)": loss_smooth_stage_refine,
+
+            "train/Smoothness Loss (UNKnowns)": loss_smooth_stage_unknowns,
+            "train/Dice Loss (UNKnowns)": loss_dice_stage_unknowns,
+
             "train/Prototype Contrastive Loss": loss_contrastive_stage_first,
             "train/Total Loss": total_loss,
         })
         print(total_loss.item(), f"DICE: {loss_dice_stage_first}",
-             )
+              )
 
         return total_loss
