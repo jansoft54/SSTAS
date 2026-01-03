@@ -3,12 +3,14 @@
 from eval.benchmark import DataEvaluation
 from loader.dataloader import VideoDataSet, VideoDataLoader
 from model.bert import ActionBERTConfig
+from model.centroid_util import update_centroids
 from model.loss import TotalLoss
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import torch
 from trainer_config import TrainerConfig
 import wandb
 import torch.nn.functional as F
+
 
 
 class Trainer():
@@ -18,18 +20,18 @@ class Trainer():
         self.train_video_dataset = VideoDataSet(dataset=trainer_config.dataset,
                                                 split=trainer_config.train_split,
                                                 default_path=trainer_config.default_path,
-                                                knowns=trainer_config.knowns,
+                                                knowns=trainer_config.known_classes,
                                                 unknowns=trainer_config.unknowns,
-                                                total_classes=trainer_config.knowns + trainer_config.K)
+                                                total_classes=trainer_config.known_classes + trainer_config.K)
         self.train_data_loader = VideoDataLoader(
             self.train_video_dataset, batch_size=trainer_config.batch_size, shuffle=True)
 
         self.test_video_dataset = VideoDataSet(dataset=trainer_config.dataset,
                                                split=trainer_config.test_split,
                                                default_path=trainer_config.default_path,
-                                               knowns=trainer_config.knowns,
+                                               knowns=trainer_config.known_classes,
                                                unknowns=trainer_config.unknowns,
-                                               total_classes=trainer_config.knowns + trainer_config.K)
+                                               total_classes=trainer_config.known_classes + trainer_config.K)
         self.test_data_loader = VideoDataLoader(
             self.test_video_dataset, len(self.test_video_dataset), shuffle=True)
 
@@ -72,7 +74,7 @@ class Trainer():
 
         weights = total_samples / counts
 
-        weights[self.config.knowns:] = 1.0
+        weights[self.config.known_classes:] = 1.0
         weights = weights / weights.mean()
 
         print(f"Absolute weights: {weights} {total_samples}")
@@ -102,27 +104,6 @@ class Trainer():
         wandb.define_metric("train-eval/*", step_metric="epoch")
         wandb.define_metric("test-eval/*", step_metric="epoch")
 
-    def update_centroids(self, model_out, target_truth, known_mask):
-        with torch.no_grad():
-            # Normalisierte Embeddings nutzen!
-            current_embs = model_out["embeddings"][known_mask]
-            current_lbls = target_truth[known_mask]
-
-            for c in range(self.config.knowns):
-                class_mask = (current_lbls == c)
-                if class_mask.any():
-                    batch_mean = current_embs[class_mask].mean(dim=0)
-                    batch_mean = F.normalize(batch_mean, p=2, dim=0)
-
-                    if not self.model.centers_initialized[c]:
-                        self.model.class_centers[c] = batch_mean
-                        self.model.centers_initialized[c] = True
-                    else:
-                        self.model.class_centers[c] = self.model.center_momentum * self.model.class_centers[c] + \
-                            (1 - self.model.center_momentum) * batch_mean
-                        self.model.class_centers[c] = F.normalize(
-                            self.model.class_centers[c], p=2, dim=0)
-
     def _generate_structured_mask(self, features, mask_ratio=0.75, block_size=64):
 
         B, S, D = features.size()
@@ -151,6 +132,62 @@ class Trainer():
 
         return mask.to(self.device)
 
+    def _get_loss_dict(self, model_out, target_truth, unknown_mask, patch_mask, padding_mask, epoch):
+
+        if self.config.train_for_knowns:
+            loss_inputs = {
+                "logits": model_out["prototype_logits"],
+                "embeddings": model_out["embeddings"],
+                "target_labels": target_truth,
+                "recon_features": model_out["recon_features"],
+                "target_features": model_out["recon_target"],
+
+                "centers": self.model.class_centers,
+                "prototypes": self.model.prototypes.weight,
+
+                "refine_logits": model_out["refine_logits"],
+                "stages_output_logits": model_out["stages_output_logits"],
+                "progress_pred": model_out["progress_pred"],
+
+                "known_mask": (~unknown_mask) & padding_mask,
+                "unknown_mask": (unknown_mask) & padding_mask,
+                "patch_mask": patch_mask,
+                "padding_mask": padding_mask,
+                "epoch": epoch,
+            }
+        else:
+
+            new_targets = target_truth.clone()
+    
+            if unknown_mask.any():
+                unk_logits = model_out["refine_logits"][unknown_mask][:, self.config.known_classes:] 
+                winning_slots = torch.argmax(unk_logits.detach(), dim=-1)
+                pseudo_labels = winning_slots +  self.config.known_classes                
+                new_targets[unknown_mask] = pseudo_labels
+            
+            loss_inputs = {
+                "logits": model_out["prototype_logits"],
+                "embeddings": model_out["embeddings"],
+                "target_labels": new_targets,
+                "recon_features": model_out["recon_features"],
+                "target_features": model_out["recon_target"],
+
+                "centers": self.model.class_centers,
+                "prototypes": self.model.prototypes_unk.weight,
+
+                "refine_logits": model_out["refine_logits"],
+                "stages_output_logits": model_out["stages_output_logits"],
+                "progress_pred": model_out["progress_pred"],
+
+                "known_mask": torch.ones_like(unknown_mask).bool() & padding_mask,
+                "unknown_mask": (unknown_mask) & padding_mask,
+                "patch_mask": patch_mask,
+                "padding_mask": padding_mask,
+                "epoch": epoch,
+            }
+
+        return loss_inputs
+
     def train(self):
         for epoch in range(self.config.num_epochs):
             self.model.train()
@@ -159,7 +196,6 @@ class Trainer():
                 features = batch["features"].to(self.device)
 
                 unknown_mask = batch["unknown_mask"].to(self.device)
-                foreground_mask = batch["foreground_mask"].to(self.device)
                 target_truth = batch["target_truth"].to(self.device)
                 padding_mask = batch["padding_mask"].to(self.device)
 
@@ -174,31 +210,13 @@ class Trainer():
                 result = self.model(
                     features, patch_mask=patch_mask, padding_mask=padding_mask)
 
-                self.update_centroids(
-                    result, target_truth, ~unknown_mask & padding_mask)
+                
+                update_centroids(
+                    self.config, self.model, result, target_truth, ~unknown_mask & padding_mask, unknown_mask & padding_mask)
 
-                loss_inputs = {
-                    "logits": result["prototype_logits"],
-                    "embeddings": result["embeddings"],
-                    "target_labels": target_truth,
-                    "recon_features": result["recon_features"],
-                    "target_features": result["recon_target"],
+                loss_inputs = self._get_loss_dict(
+                    result, target_truth, unknown_mask, patch_mask, padding_mask, epoch)
 
-                    "centers": self.model.class_centers,
-                    "prototypes": self.model.prototypes.weight,
-
-                    "refine_logits": result["refine_logits"],
-                    "stages_output_logits": result["stages_output_logits"],
-
-                    "unkown_logits": result["unkown_logits"],
-                    "stages_output_unknown_logits": result["stages_output_unknown_logits"],
-
-                    "known_mask": (~unknown_mask) & padding_mask,
-                    "unknown_mask": (unknown_mask) & padding_mask,
-                    "patch_mask": patch_mask,
-                    "padding_mask": padding_mask,
-                    "epoch": epoch,
-                }
                 loss = self.total_loss(loss_inputs)
 
                 wandb.log({

@@ -33,32 +33,38 @@ set_deterministic(42)
 knowns = 14
 unknowns = 5
 prototypes = 0
+train_for_knowns = False
 
-trainer_config = TrainerConfig(
-    train_split="train.split2.bundle",
-    test_split="test.split2.bundle",
-    knowns=knowns,
-    unknowns=unknowns,
-    K=prototypes,
-    batch_size=1,
-    num_epochs=35,
-    output_name="actionbert_second_try"
-)
-bert_conf = ActionBERTConfig(
-    total_classes=knowns + prototypes,
-    input_dim=2048,
-    d_model=256,
-    num_heads=8,
-    num_layers=4,
-    local_window_size=128,
-    window_dilation=32,
-    dropout=0)
-model = ActionBERT(config=bert_conf)
+for i in range(2, 3):
+    
+    trainer_config = TrainerConfig(
+        train_split=f"train.split{i}.bundle",
+        test_split=f"test.split{i}.bundle",
+        train_for_knowns=train_for_knowns,
+        known_classes=knowns,
+        unknowns=unknowns,
+        K=prototypes,
+        batch_size=1,
+        num_epochs=45,
+        output_name=f"actionbert_unk_split{i}"
+    )
+    bert_conf = ActionBERTConfig(
+        known_classes=knowns,
+        input_dim=2048,
+        d_model=256,
+        num_heads=8,
+        num_layers=3,
+        local_window_size=128,
+        window_dilation=32,
+        dropout=0)
 
-trainer = Trainer(trainer_config=trainer_config, model_config=bert_conf)
+
+    model = ActionBERT(config=bert_conf, train_for_knowns=train_for_knowns)
+
+    trainer = Trainer(trainer_config=trainer_config, model_config=bert_conf)
 
 
-print("Active parameters: ", sum(p.numel()
-      for p in model.parameters() if p.requires_grad))
-trainer.add_model(model=model)
-trainer.train()
+    print("Active parameters: ", sum(p.numel()
+        for p in model.parameters() if p.requires_grad))
+    trainer.add_model(model=model)
+    trainer.train()

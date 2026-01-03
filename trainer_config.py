@@ -10,17 +10,20 @@ class TrainerConfig:
     default_path: str = "./data/data/"
     output_name: str = "output"
 
+    train_for_knowns: bool = True
+
     batch_size: int = 1
-    knowns: int = 14
+    known_classes: int = 14
     unknowns: int = 5
     K: int = 30
+    total_classes: int = known_classes + K
 
-    learning_rate: float = 2e-4
+    learning_rate: float = 3e-4
     epsilon: float = 1e-8
-    weight_decay: float = 0.02
+    weight_decay: float = 0
 
     num_epochs: int = 50
-    mask_ratio: float = 0  # 0.8
+    mask_ratio: float = 0 # 0.8
     block_size: int = 128
 
     min_span: int = 32

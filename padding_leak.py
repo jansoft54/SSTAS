@@ -123,14 +123,14 @@ def test_padding_and_batch_mixing(model, input_dim=2048):
 
 # --- RUN ---
 bert_conf = ActionBERTConfig(
-    total_classes=14 + 30,
+    known_classes=14 + 30,
     input_dim=2048,
     d_model=256,
     num_heads=8,
     num_layers=4,
     dropout=0.0  # Dropout im Config auch aus
 )
-model = ActionBERT(config=bert_conf)
+model = ActionBERT(config=bert_conf, train_for_knowns=False)
 
 # Lade Gewichte falls vorhanden
 try:

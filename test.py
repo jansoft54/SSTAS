@@ -2,11 +2,11 @@ from eval.benchmark import DataEvaluation
 from loader.dataloader import VideoDataLoader, VideoDataSet
 from model.bert import ActionBERT, ActionBERTConfig
 import torch.nn.functional as F
-import torch 
+import torch
 knowns = 14
 prototypes = 30
 bert_conf = ActionBERTConfig(
-    total_classes=knowns + prototypes,
+    known_classes=knowns + prototypes,
     input_dim=2048,
     d_model=128,
     num_heads=8,
@@ -22,7 +22,8 @@ model = model.to('cuda')
 model.eval()
 print("Modell erfolgreich geladen.")
 
-data_set = VideoDataSet(dataset="50salads",split="test.split1.bundle",knowns=14,unknowns=5)
+data_set = VideoDataSet(
+    dataset="50salads", split="test.split1.bundle", knowns=14, unknowns=5)
 loader = VideoDataLoader(data_set, batch_size=len(data_set), shuffle=True)
 test_eval = DataEvaluation(loader)
 test_eval.eval(model=model)

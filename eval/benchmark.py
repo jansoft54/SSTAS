@@ -20,9 +20,10 @@ class DataEvaluation:
 
         model.eval()
         model = model.to(self.device)
+        gather = {}
         with torch.no_grad():
             for batch in self.loader:
-
+               # print("Evaluating batch...")
                 features = batch["features"].to(self.device)
                 target_truth = batch["target_truth"].to(self.device)
                 padding_mask = batch["padding_mask"].to(self.device)
@@ -42,17 +43,32 @@ class DataEvaluation:
                                       train=self.train,
                                       known_classes=knowns,
                                       unkown_classes=unknowns)
-                known_pref, unkown_perf = evaluator.evaluate(model_pred=class_labels,
-                                                             ground_truth=target_truth,
+                known_pref, unkown_perf = evaluator.evaluate(model_pred_knowns=class_labels,
+                                                             model_pred_is_unknown=None,
+                                                             ground_truth_knowns=target_truth,
                                                              padding_mask=padding_mask,
                                                              unknown_mask=unknown_mask)
+                
+              #  print("hallo")
+                """for metric, value in known_pref.items():
+                    if  metric not in gather:
+                         gather[metric] = []
+                    gather[metric].append(value)"""
+                 
 
                 known_pref["epoch"] = (epoch)
-                unkown_perf["epoch"] = (epoch)
+              #  unkown_perf["epoch"] = (epoch)
                 if console_log:
-                    print(known_pref)
+                   pass
                 else:
 
                     import wandb
                     wandb.log(known_pref)
-                break
+                   # wandb.log(unkown_perf)
+                
+            
+        """final_metrics = {}
+        for metric, values in gather.items():
+            final_metrics[metric] = sum(values) / len(values)
+            
+        return final_metrics"""

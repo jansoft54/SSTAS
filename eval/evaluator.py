@@ -78,7 +78,7 @@ class Evaluator():
 
         return pred_indices, targets_indices
 
-    def _eval(self, model_pred, ground_truth, padding_mask, unknown_mask, num_classes):
+    def _eval(self, model_pred, ground_truth, padding_mask, unknown_mask, num_classes, unknowns=False):
 
         prefix = "train-eval" if self.train else "test-eval"
         gt_prepared = ground_truth.clone()
@@ -86,42 +86,45 @@ class Evaluator():
 
         pred_prepared[~padding_mask] = -100
         gt_prepared[~padding_mask] = -100
-        unknown_mask = padding_mask & unknown_mask
 
-        pred_prepared[unknown_mask] = -100
-        gt_prepared[unknown_mask] = -100
+        if not unknowns:
+            unknown_mask = padding_mask & unknown_mask
+            pred_prepared[unknown_mask] = -100
+            gt_prepared[unknown_mask] = -100
+        else:
+            gt_prepared[~unknown_mask] = 0
 
         ignore_list = [-100]
 
         mof_metric = MacroMoFAccuracyMetric(ignore_ids=ignore_list)
         edit_metric = Edit(ignore_ids=ignore_list)
-        f1_metric = F1Score(num_classes=num_classes, ignore_ids=ignore_list)
+        f1_metric = F1Score(num_classes=None, ignore_ids=ignore_list)
 
         mof_metric.add(gt_prepared, pred_prepared)
         edit_metric.add(gt_prepared, pred_prepared)
         f1_metric.add(gt_prepared, pred_prepared)
 
+        label = "Unknown" if unknowns else "Known"
+
         return {
-            f"{prefix}/mof": (mof_metric.summary() * 100),
-            f"{prefix}/edit": (edit_metric.summary()),
-            f"{prefix}/f1_10": (f1_metric.summary()["F1@10"] * 100),
-            f"{prefix}/f1_25": (f1_metric.summary()["F1@25"] * 100),
-            f"{prefix}/f1_50": (f1_metric.summary()["F1@50"] * 100)}
+            f"{prefix}/mof {label}": (mof_metric.summary() * 100),
+            f"{prefix}/edit {label}": (edit_metric.summary()),
+            f"{prefix}/f1_10 {label}": (f1_metric.summary()["F1@10"] * 100),
+            f"{prefix}/f1_25 {label}": (f1_metric.summary()["F1@25"] * 100),
+            f"{prefix}/f1_50 {label}": (f1_metric.summary()["F1@50"] * 100)}
 
-    def evaluate(self, model_pred, ground_truth, padding_mask, unknown_mask, print_results=False):
-       # model_pred,ground_truth = self.compute_hungarian_cost(model_pred, ground_truth)
-        unknown_on_known = range(
-            self.known_classes, self.known_classes + self.unkown_classes)
-        unknown_on_unknown = range(self.known_classes)
+    def evaluate(self, model_pred_knowns, ground_truth_knowns, model_pred_is_unknown, padding_mask, unknown_mask, print_results=False):
 
-        unknown_perf = self._eval(
-            model_pred, ground_truth, padding_mask, unknown_mask, self.unkown_classes)
-        known_perf = self._eval(model_pred, ground_truth,
-                                padding_mask, unknown_mask, self.known_classes)
+        is_unknown_perf = None
+        """self._eval(
+            model_pred_is_unknown, unknown_mask.long(), padding_mask, unknown_mask, 2,unknowns=True)"""
+
+        known_perf = self._eval(model_pred_knowns, ground_truth_knowns,
+                                padding_mask, unknown_mask, self.known_classes, unknowns=False)
 
         if print_results:
-            self._print_results_table(known_perf, unknown_perf)
-        return known_perf, unknown_perf
+            self._print_results_table(known_perf, is_unknown_perf)
+        return known_perf, is_unknown_perf
 
     def _print_results_table(self, results_a, results_b, name_a="Known", name_b="Unknown"):
 

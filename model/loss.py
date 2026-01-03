@@ -4,6 +4,46 @@ import torch.nn.functional as F
 from trainer_config import TrainerConfig
 import wandb
 
+class VideoProgressLoss(nn.Module):
+    def __init__(self, weight=5.0):
+        """
+        weight: Da MSE-Werte bei Werten zwischen 0-1 oft klein sind, 
+                hilft ein höheres Gewicht (z.B. 5.0), um den Backbone zu trainieren.
+        """
+        super().__init__()
+        self.weight = weight
+
+    def forward(self, pred, padding_mask):
+        """
+        pred: [B, T, 1] - Der Sigmoid-Output deines Progress-Heads
+        padding_mask: [B, T] - 1 für Daten, 0 für Padding
+        """
+        # 1. Dimension anpassen: [B, T, 1] -> [B, T]
+        pred = pred.squeeze(-1)
+        device = pred.device
+
+        # 2. Ground Truth (0.0 bis 1.0) aus Maske generieren
+        # Berechne tatsächliche Länge pro Video im Batch
+        T_actual = padding_mask.sum(dim=-1, keepdim=True) # [B, 1]
+        
+        # Erzeuge Frame-Indizes (0, 1, 2...)
+        indices = torch.cumsum(padding_mask.long(), dim=-1) - 1
+        indices = indices.clamp(min=0) # Padding-Indizes auf 0 halten
+        
+        # Normieren auf Bereich [0, 1]
+        # (T_actual - 1), damit der letzte Frame exakt 1.0 ist
+        denom = (T_actual - 1).clamp(min=1) 
+        gt = indices.float() / denom.float()
+        
+        # 3. MSE berechnen
+        # Wir berechnen den quadratischen Fehler für jeden Frame
+        loss_map = (pred - gt).pow(2)
+        
+        # 4. Nur valide Frames (kein Padding) in den Durchschnitt nehmen
+        # loss_map[padding_mask] gibt einen flachen Vektor aller validen Fehler zurück
+        final_loss = loss_map[padding_mask].mean()
+
+        return self.weight * final_loss
 
 class ReconLoss(nn.Module):
     def __init__(self, trainer_config: TrainerConfig):
@@ -31,7 +71,7 @@ class TemporalSmoothnessLoss(nn.Module):
         super().__init__()
         self.mse = nn.MSELoss(reduction='none')
         self.trainer_config = trainer_config
-        self.mse_clip_val = 4
+        self.mse_clip_val = 16
 
     def forward(self, p, padding_mask):
         """
@@ -58,7 +98,7 @@ class TemporalSmoothnessLoss(nn.Module):
 
 
 class CentroidContrastiveLoss(nn.Module):
-    def __init__(self, pull_weight=1.0, push_weight=0.5, margin=0.1):
+    def __init__(self, pull_weight=1.0, push_weight=0.75, margin=0.1):
         super().__init__()
         self.pull_weight = pull_weight
         self.push_weight = push_weight
@@ -78,7 +118,7 @@ class CentroidContrastiveLoss(nn.Module):
 
         emb = F.normalize(emb, p=2, dim=-1)
 
-        sim_matrix = torch.matmul(emb, centers.t())
+        sim_matrix = torch.matmul(emb, centers.detach().t())
 
         temp = 0.07
         correct_sims = sim_matrix[torch.arange(emb.size(0)), lbl]
@@ -116,8 +156,8 @@ class CentroidContrastiveLoss(nn.Module):
             class_sim - torch.eye(K).to(prototypes.device)).pow(2).mean()
 
         wandb.log({
-            "Contrastive LOSS loss_push": loss_pull,
-            "Contrastive LOSS loss_pull": loss_push,
+            "Contrastive LOSS loss_push": loss_push,
+            "Contrastive LOSS loss_pull": loss_pull,
             "Contrastive LOSS loss_ortho": loss_ortho,
         })
 
@@ -125,14 +165,14 @@ class CentroidContrastiveLoss(nn.Module):
 
 
 class FocalLoss(nn.Module):
-    def __init__(self, gamma=2.0, alpha=None, reduction='mean'):
+    def __init__(self, gamma=1.0, alpha=None, reduction='mean'):
 
         super().__init__()
         self.gamma = gamma
         self.alpha = alpha
         self.reduction = reduction
 
-    def forward(self, inputs, targets, mask):
+    def forward(self, inputs, targets, mask, is_focal=False):
 
       #  print(inputs.shape,targets.shape)
         inputs = inputs[mask]
@@ -140,7 +180,8 @@ class FocalLoss(nn.Module):
         ce_loss = F.cross_entropy(
             inputs, targets,  weight=self.alpha, label_smoothing=0)
 
-        return ce_loss
+        if not is_focal:
+            return ce_loss
         pt = torch.exp(-ce_loss)
 
         focal_loss = ((1 - pt) ** self.gamma) * ce_loss
@@ -185,11 +226,19 @@ class TotalLoss(nn.Module):
         self.bce_loss = nn.BCEWithLogitsLoss(pos_weight=None)
 
         self.focal_loss = FocalLoss(alpha=None)
+        self.unk_class_weights = torch.tensor([1.0, 5.0]).to(self.device)
+
+        self.focal_loss_unknowns = FocalLoss(
+            gamma=1.0, alpha=self.unk_class_weights)
+
         self.recon_loss = ReconLoss(trainer_config=trainer_config)
         self.smooth_loss = TemporalSmoothnessLoss(
             trainer_config=trainer_config)
         self.contrastive_loss = CentroidContrastiveLoss()
         self.dice_loss = MulticlassDiceLoss()
+        self.video_progress_loss = VideoProgressLoss(weight=5.0)
+        
+        
         self.ce_weight = trainer_config.pim_loss_weight
         self.recon_weight = trainer_config.recon_loss_weight
         self.smooth_weight = trainer_config.smooth_loss_weight
@@ -202,25 +251,25 @@ class TotalLoss(nn.Module):
         """loss_pim = self.pim_loss(
             logits, target_labels, unknown_mask, known_mask) if self.pim_weight > 0 else zero"""
         logits = loss_dict["logits"]
-        refine_logits = loss_dict["refine_logits"]
-        stage_output_logits = loss_dict["stages_output_logits"],
+      #  refine_logits = loss_dict["refine_logits"]
+        stage_output_logits = loss_dict["stages_output_logits"]
 
         known_mask = loss_dict["known_mask"]
         unknown_mask = loss_dict["unknown_mask"]
 
         target_labels = loss_dict["target_labels"]
-        recon_features = loss_dict["recon_features"]
-        target_features = loss_dict["target_features"]
-        patch_mask = loss_dict["patch_mask"]
+      #  recon_features = loss_dict["recon_features"]
+       # target_features = loss_dict["target_features"]
+        # patch_mask = loss_dict["patch_mask"]
         padding_mask = loss_dict["padding_mask"]
         embeddings = loss_dict["embeddings"]
         centers = loss_dict["centers"]
         prototypes = loss_dict["prototypes"]
         epoch = loss_dict["epoch"]
 
-        # S1 Unknown Detector
-        stages_output_unkown_logits = loss_dict["stages_output_unknown_logits"]
-
+      #  logits[:, :, -1] -= 2.0 
+       # stage_output_logits[:,:,:,-1] -= 2.0
+        
         loss_dice_stage_first = self.dice_loss(
             logits, target_labels, padding_mask & known_mask)
         loss_focal_stage_first = self.focal_loss(
@@ -229,54 +278,49 @@ class TotalLoss(nn.Module):
             recon_features, target_features, patch_mask) if self.recon_weight > 0 else zero"""
 
         loss_smooth_stage_first = self.smooth_loss(
-            logits, padding_mask) if self.smooth_weight > 0 else zero
+            logits, padding_mask& known_mask) if self.smooth_weight > 0 else zero
 
         loss_contrastive_stage_first = self.contrastive_loss(
             embeddings, target_labels, centers, prototypes, known_mask) if epoch >= 15 else zero
 
         loss_smooth_stage_refine = sum([self.smooth_loss(
-            refine_logits_, padding_mask) for _, refine_logits_ in enumerate(stage_output_logits[0])]) / len(stage_output_logits[0])
+            refine_logits_, padding_mask& known_mask) for _, refine_logits_ in enumerate(stage_output_logits)]) / len(stage_output_logits)
 
         loss_dice_stage_refine = sum(
-            [self.dice_loss(refine_logits_, target_labels, padding_mask & known_mask) for _, refine_logits_ in enumerate(stage_output_logits[0])]) / len(stage_output_logits[0])
+            [self.dice_loss(refine_logits_, target_labels, padding_mask & known_mask) for _, refine_logits_ in enumerate(stage_output_logits)]) / len(stage_output_logits)
 
         loss_focal_stage_refine = sum([self.focal_loss(
-            refine_logits_, target_labels, padding_mask & known_mask) for _, refine_logits_ in enumerate(stage_output_logits[0])]) / len(stage_output_logits[0])
+            refine_logits_, target_labels, padding_mask & known_mask) for _, refine_logits_ in enumerate(stage_output_logits)]) / len(stage_output_logits)
 
-        loss_smooth_stage_unknowns = sum([self.smooth_loss(
-            u_logits.unsqueeze(0), padding_mask) for _, u_logits in enumerate(stages_output_unkown_logits[0])]) / len(stages_output_unkown_logits[0])
 
-        loss_dice_stage_unknowns = sum(
-            [self.dice_loss(u_logits.unsqueeze(0), unknown_mask.long(), padding_mask) for _, u_logits in enumerate(stages_output_unkown_logits[0])]) / len(stages_output_unkown_logits[0])
-
-        loss_focal_stage_unknowns = sum([self.focal_loss(
-            u_logits.unsqueeze(0), unknown_mask.long(), padding_mask) for _, u_logits in enumerate(stages_output_unkown_logits[0])]) / len(stages_output_unkown_logits[0])
-
+       # loss_video_progress =  self.video_progress_loss(loss_dict["progress_pred"], padding_mask)
         total_loss = (1 * loss_dice_stage_first +
                       1 * loss_focal_stage_first +
                       # 0 * loss_recon_stage_first +
-                      # 0.1 * loss_smooth_stage_first +
+                      1.5 * loss_smooth_stage_first +
                       1 * loss_contrastive_stage_first +
                       1 * loss_dice_stage_refine +
-                      1 * loss_smooth_stage_refine +
-                      1 * loss_focal_stage_refine +
+                      1.5* loss_smooth_stage_refine +
+                      1 * loss_focal_stage_refine 
+                    #    1.0 * loss_video_progress
 
-                      1 * loss_smooth_stage_unknowns +
-                      1 * loss_dice_stage_unknowns +
-                      1 * loss_focal_stage_unknowns
+
                       )
 
         wandb.log({
-            "train/Dice Loss (Knowns)": loss_dice_stage_first + loss_dice_stage_refine,
-            "train/Smoothness Loss (Knowns)": loss_smooth_stage_refine,
+            "train/Dice Loss ": loss_dice_stage_first + loss_dice_stage_refine,
+            "train/CE Loss ": loss_focal_stage_first + loss_focal_stage_refine,
 
-            "train/Smoothness Loss (UNKnowns)": loss_smooth_stage_unknowns,
-            "train/Dice Loss (UNKnowns)": loss_dice_stage_unknowns,
+            "train/Smoothness Loss ": loss_smooth_stage_refine,
+          #  "train/Progress Loss ": ,
+            
+
+
 
             "train/Prototype Contrastive Loss": loss_contrastive_stage_first,
             "train/Total Loss": total_loss,
         })
-        print(total_loss.item(), f"DICE: {loss_dice_stage_first}",
+        print(total_loss.item(), f"DICE: {loss_dice_stage_refine}", f"CE: {loss_focal_stage_refine}",
               )
 
         return total_loss

@@ -3,4 +3,5 @@ matplotlib
 scikit-learn
 plotly
 pandas
+seaborn
 wandb
