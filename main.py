@@ -30,13 +30,33 @@ def set_deterministic(seed=42):
 set_deterministic(42)
 
 
-knowns = 14
-unknowns = 5
+knowns = ["cut_tomato",
+          "place_tomato_into_bowl",
+          "cut_cheese",
+          "place_cheese_into_bowl",
+          "cut_lettuce",
+          "place_lettuce_into_bowl",
+          "add_salt",
+          "add_vinegar",
+          "add_oil",
+          "add_pepper",
+          "mix_dressing",
+          "peel_cucumber",
+          "cut_cucumber",
+          "place_cucumber_into_bowl",
+          "add_dressing",
+          "mix_ingredients",
+          "serve_salad_onto_plate",
+          "action_start",
+          "action_end",
+          ]
+unknowns = []
 prototypes = 0
-train_for_knowns = False
+train_for_knowns = True
 
-for i in range(2, 3):
-    
+for i in range(1, 2):
+
+    print(f"train.split{i}.bundle")
     trainer_config = TrainerConfig(
         train_split=f"train.split{i}.bundle",
         test_split=f"test.split{i}.bundle",
@@ -46,7 +66,7 @@ for i in range(2, 3):
         K=prototypes,
         batch_size=1,
         num_epochs=45,
-        output_name=f"actionbert_unk_split{i}"
+        output_name=f"actionbert_full_known_split{i}_test"
     )
     bert_conf = ActionBERTConfig(
         known_classes=knowns,
@@ -58,13 +78,11 @@ for i in range(2, 3):
         window_dilation=32,
         dropout=0)
 
-
     model = ActionBERT(config=bert_conf, train_for_knowns=train_for_knowns)
 
     trainer = Trainer(trainer_config=trainer_config, model_config=bert_conf)
 
-
     print("Active parameters: ", sum(p.numel()
-        for p in model.parameters() if p.requires_grad))
+                                     for p in model.parameters() if p.requires_grad))
     trainer.add_model(model=model)
     trainer.train()

@@ -4,12 +4,13 @@ from eval.benchmark import DataEvaluation
 from loader.dataloader import VideoDataSet, VideoDataLoader
 from model.bert import ActionBERTConfig
 from model.centroid_util import update_centroids
-from model.loss import TotalLoss
+from model.loss_boundary_model import TotalLoss
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import torch
 from trainer_config import TrainerConfig
 import wandb
 import torch.nn.functional as F
+
 
 
 class Trainer():
@@ -21,7 +22,7 @@ class Trainer():
                                                 default_path=trainer_config.default_path,
                                                 knowns=trainer_config.known_classes,
                                                 unknowns=trainer_config.unknowns,
-                                                )
+                                                total_classes=trainer_config.known_classes + trainer_config.K)
         self.train_data_loader = VideoDataLoader(
             self.train_video_dataset, batch_size=trainer_config.batch_size, shuffle=True)
 
@@ -29,13 +30,16 @@ class Trainer():
                                                split=trainer_config.test_split,
                                                default_path=trainer_config.default_path,
                                                knowns=trainer_config.known_classes,
-                                               unknowns=trainer_config.unknowns)
+                                               unknowns=trainer_config.unknowns,
+                                               total_classes=trainer_config.known_classes + trainer_config.K)
         self.test_data_loader = VideoDataLoader(
             self.test_video_dataset, len(self.test_video_dataset), shuffle=True)
 
         self.device = torch.device(
             "cuda" if torch.cuda.is_available() else "cpu")
-
+        
+       
+       
         self.total_loss = TotalLoss(
             trainer_config=trainer_config, class_weights=None)
 
@@ -44,10 +48,10 @@ class Trainer():
         self.train_evaluator = DataEvaluation(
             self.train_data_loader, train=True)
 
+
     def add_model(self, model):
         self.model = model
         self.model.to(self.device)
-        print(self.config.weight_decay)
         self.optim = torch.optim.AdamW(model.parameters(),
                                        lr=self.config.learning_rate,
                                        weight_decay=self.config.weight_decay,
@@ -61,96 +65,64 @@ class Trainer():
         config = vars(self.config) | vars(self.model_config)
 
         self.run = wandb.init(
-            project="ActionBERT",
+            project="SSAD",
             name="NewTest",
             config=config
         )
         wandb.define_metric("train-eval/*", step_metric="epoch")
         wandb.define_metric("test-eval/*", step_metric="epoch")
 
-    def _generate_structured_mask(self, features, mask_ratio=0.75, block_size=64):
+    
+    def target_gen(self, targets, known_mask):
+        with torch.no_grad():
+            B, T = targets.shape
+            gt_dist_start = torch.full((B, T), -1.0, device=targets.device)
+            gt_dist_end   = torch.full((B, T), -1.0, device=targets.device)
 
-        B, S, D = features.size()
-        mask = torch.zeros((B, S), dtype=torch.bool)
+            for b in range(B):
+            
+                vals, counts = torch.unique_consecutive(targets[b], return_counts=True)
+                
+                current_idx = 0
+                for length in counts:
+                    length = length.item()
+                    
+                    if known_mask[b, current_idx]:
+                       
+                        gt_dist_start[b, current_idx : current_idx+length] = \
+                            torch.arange(length, dtype=torch.float, device=targets.device)
 
-        for t in range(0, S, block_size):
-            end_t = min(t + block_size, S)
-            actual_block_len = end_t - t
+                        gt_dist_end[b, current_idx : current_idx+length] = \
+                            torch.arange(length, dtype=torch.float, device=targets.device).flip(0)
+                    
+                    current_idx += length
+                    
+            return gt_dist_start, gt_dist_end
+                    
+    def _get_loss_dict(self, model_out, target_truth, unknown_mask, padding_mask, epoch):
 
-            curr_mask_len = int(actual_block_len * mask_ratio)
 
-            if curr_mask_len == 0:
-                continue
+        gt_dist_start, gt_dist_end = self.target_gen(target_truth, (~unknown_mask) & padding_mask)
 
-            max_start = actual_block_len - curr_mask_len
+        loss_inputs = {
+            "logits": model_out["prototype_logits"],
+            "embeddings": model_out["embeddings"],
+            "target_labels": target_truth,
+            "action_progress": model_out["action_progress"],
+            "gt_dist_start": gt_dist_start,
+            "gt_dist_end": gt_dist_end,
+            
+            "centers": self.model.class_centers,
+            "prototypes": self.model.prototypes.weight,
 
-            if max_start > 0:
+            "refine_logits": model_out["refine_logits"],
+            "stages_output_logits": model_out["stages_output_logits"],
 
-                rel_starts = torch.randint(0, max_start, (B,))
-
-                for b in range(B):
-                    abs_start = t + rel_starts[b].item()
-                    mask[b, abs_start: abs_start + curr_mask_len] = True
-            else:
-                mask[:, t:end_t] = True
-
-        return mask.to(self.device)
-
-    def _get_loss_dict(self, model_out, target_truth, unknown_mask, patch_mask, padding_mask, epoch):
-
-        if self.config.train_for_knowns:
-            loss_inputs = {
-                "logits": model_out["prototype_logits"],
-                "embeddings": model_out["embeddings"],
-                "target_labels": target_truth,
-                "recon_features": model_out["recon_features"],
-                "target_features": model_out["recon_target"],
-
-                "centers": self.model.class_centers,
-                "prototypes": self.model.prototypes.weight,
-
-                "refine_logits": model_out["refine_logits"],
-                "stages_output_logits": model_out["stages_output_logits"],
-                "progress_pred": model_out["progress_pred"],
-
-                "known_mask": (~unknown_mask) & padding_mask,
-                "unknown_mask": (unknown_mask) & padding_mask,
-                "patch_mask": patch_mask,
-                "padding_mask": padding_mask,
-                "epoch": epoch,
-            }
-        else:
-
-            new_targets = target_truth.clone()
-
-            if unknown_mask.any():
-                unk_logits = model_out["refine_logits"][unknown_mask][:,
-                                                                      self.config.known_classes:]
-                winning_slots = torch.argmax(unk_logits.detach(), dim=-1)
-                pseudo_labels = winning_slots + self.config.known_classes
-                new_targets[unknown_mask] = pseudo_labels
-
-            loss_inputs = {
-                "logits": model_out["prototype_logits"],
-                "embeddings": model_out["embeddings"],
-                "target_labels": new_targets,
-                "recon_features": model_out["recon_features"],
-                "target_features": model_out["recon_target"],
-
-                "centers": self.model.class_centers,
-                "prototypes": self.model.prototypes_unk.weight,
-
-                "refine_logits": model_out["refine_logits"],
-                "stages_output_logits": model_out["stages_output_logits"],
-                "progress_pred": model_out["progress_pred"],
-
-                "known_mask": torch.ones_like(unknown_mask).bool() & padding_mask,
-                "unknown_mask": (unknown_mask) & padding_mask,
-                "patch_mask": patch_mask,
-                "padding_mask": padding_mask,
-                "epoch": epoch,
-            }
-
+            "known_mask": (~unknown_mask) & padding_mask,
+            "unknown_mask": (unknown_mask) & padding_mask,
+            "padding_mask": padding_mask,
+            "epoch": epoch,
+        }
         return loss_inputs
 
     def train(self):
@@ -163,23 +135,21 @@ class Trainer():
                 unknown_mask = batch["unknown_mask"].to(self.device)
                 target_truth = batch["target_truth"].to(self.device)
                 padding_mask = batch["padding_mask"].to(self.device)
-
-                patch_mask = self._generate_structured_mask(features,
-                                                            mask_ratio=self.config.mask_ratio,
-                                                            block_size=self.config.block_size,)
-
-                patch_mask = patch_mask & (padding_mask.bool())
-
+               
+                print(padding_mask.shape)
+              
                 self.model.train()
 
                 result = self.model(
-                    features, padding_mask=padding_mask)
+                    features,  padding_mask=padding_mask)
 
+                
                 update_centroids(
                     self.config, self.model, result, target_truth, ~unknown_mask & padding_mask, unknown_mask & padding_mask)
 
+
                 loss_inputs = self._get_loss_dict(
-                    result, target_truth, unknown_mask, patch_mask, padding_mask, epoch)
+                    result, target_truth, unknown_mask, padding_mask, epoch)
 
                 loss = self.total_loss(loss_inputs)
 
@@ -190,8 +160,8 @@ class Trainer():
                 loss.backward()
 
                 self.optim.step()
-            # self.test_evaluator.eval(self.model, epoch)
-            # self.train_evaluator.eval(self.model, epoch)
+            self.test_evaluator.eval(self.model, epoch)
+            self.train_evaluator.eval(self.model, epoch)
 
             print(
                 f"-------------------- Epoch {epoch+1}/{self.config.num_epochs} -------------------- ")

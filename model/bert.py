@@ -7,8 +7,7 @@ import torch.nn as nn
 import math
 import torch.nn.functional as F
 from dataclasses import dataclass
-from model.attention import RotaryEmbedding, rotate_half, apply_rotary_pos_emb, RotaryMHA
-
+from model.attention import GlobalAttention, LocalAttention, RotaryEmbedding, rotate_half, apply_rotary_pos_emb, RotaryMHA
 
 
 _debug = {
@@ -149,8 +148,10 @@ class DilatedConv(nn.Module):
         :param masks:
         :return:
         """
-        
-        return self.activation(self.dilated_conv(x.transpose(1,2))).transpose(1,2) * masks.unsqueeze(-1)
+
+        return self.activation(self.dilated_conv(x.transpose(1, 2))).transpose(1, 2) * masks.unsqueeze(-1)
+
+
 class MaskingModule(nn.Module):
     def __init__(self, input_dim, model_dim):
         super().__init__()
@@ -167,7 +168,7 @@ class MaskingModule(nn.Module):
         out = features.clone()
 
         if mask is None:
-            return out
+            return features
 
         # Zufallszahlen für jede Position im Batch generieren [B, T]
         probs = torch.rand(features.shape[:2], device=features.device)
@@ -198,211 +199,6 @@ class MaskingModule(nn.Module):
         return out
 
 
-"""
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=20000):
-        super().__init__()
-        pe = torch.zeros(max_len, d_model)
-
-        position = torch.arange(0, max_len).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model)
-        )
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-
-        T = x.size(1)
-
-        return x + self.pe[:T].unsqueeze(0)
-"""
-
-
-class LocalAttention(nn.Module):
-    def __init__(self, config: ActionBERTConfig, local_window_size=64):
-
-        super().__init__()
-        self.local_window_size = local_window_size
-        self.norm = nn.LayerNorm(config.d_model)
-        self.rotary_mha = RotaryMHA(config=config)
-        self.local_rope = RotaryEmbedding(config.d_model // config.num_heads)
-
-    def create_windows(self, x, padding_mask, cos, sin):
-        B, T, C = x.shape
-        W = self.local_window_size
-
-        pad_end = (W - (T % W)) % W
-        clean_mask = padding_mask.unsqueeze(-1).type_as(x)
-        x = x * clean_mask
-
-        if pad_end > 0:
-            x_padded = F.pad(x, (0, 0, 0, pad_end))
-
-            padding_mask_padded = F.pad(
-                padding_mask, (0, pad_end), value=False)
-
-        else:
-            x_padded = x
-            padding_mask_padded = padding_mask
-
-        q_windows = x_padded.unfold(1, W, W).permute(
-            0, 1, 3, 2).reshape(-1, W, C)
-
-        """ cos_q = cos_padded.unfold(1, W, W).permute(
-            0, 1, 3, 2).reshape(-1, W, cos_padded.shape[-1]).unsqueeze(1)
-        """
-
-        """ sin_q = sin_padded.unfold(1, W, W).permute(
-            0, 1, 3, 2).reshape(-1, W, sin_padded.shape[-1]).unsqueeze(1)
-        """
-
-        half_pad = W // 2
-        x_context = F.pad(x_padded, (0, 0, half_pad, half_pad))
-
-        k_windows = x_context.unfold(
-            1, 2*W, W).permute(0, 1, 3, 2).reshape(-1, 2*W, C)
-
-        cos_k, sin_k = self.local_rope(k_windows, seq_len=2*W)
-        cos_q = cos_k[:, :, half_pad: half_pad + W, :]
-        sin_q = sin_k[:, :, half_pad: half_pad + W, :]
-
-        padding_mask_k = F.pad(padding_mask_padded,
-                               (half_pad, half_pad), value=False)
-        padding_mask_k = padding_mask_k.unfold(1, 2*W, W).reshape(-1, 2*W)
-
-        q = q_windows
-        k = k_windows
-        pk = padding_mask_k
-
-        return q, k, pk, cos_q, sin_q, cos_k, sin_k
-
-    def forward(self, x, padding_mask, cos=None, sin=None):
-        batch_size, seq_len, dim = x.size()
-        q, k, pk, cos_q, sin_q, cos_k, sin_k = self.create_windows(
-            x, padding_mask=padding_mask, cos=cos, sin=sin)
-        v = k
-
-        attn_mask = pk.clone()
-        rows_with_no_data = ~attn_mask.any(dim=-1)
-
-        if rows_with_no_data.any():
-            attn_mask[rows_with_no_data, 0] = True
-
-        attn_output = self.rotary_mha(
-            q, k, v, cos_q, sin_q, cos_k, sin_k, key_padding_mask=attn_mask)
-
-        attn_output = attn_output.view(
-            batch_size, -1, self.local_window_size, dim)
-
-        attn_output = attn_output.flatten(1, 2)[:, :seq_len, :]
-        if torch.isnan(attn_output).any():
-            raise Exception("NaN values detected in LOCAL attention output")
-
-        return attn_output.contiguous()
-
-
-class GlobalAttention(nn.Module):
-    def __init__(self, config: ActionBERTConfig, window_dilation=8):
-        super().__init__()
-        self.rotary_mha = RotaryMHA(config=config)
-        self.norm = nn.LayerNorm(config.d_model)
-        self.window_dilation = window_dilation
-        self.global_rope = RotaryEmbedding(config.d_model // config.num_heads,)
-
-    def create_windows(self, x, padding_mask, cos, sin):
-        B, T, C = x.shape
-        W = self.window_dilation
-        pad_end = (W - (T % W)) % W
-
-        """ cos_t = cos.squeeze(0).squeeze(0).unsqueeze(
-            0).expand(B, -1, -1)  # [B, T, HeadDim]
-        sin_t = sin.squeeze(0).squeeze(0).unsqueeze(0).expand(B, -1, -1)
-        """
-        if pad_end > 0:
-            x_padded = F.pad(x, (0, 0, 0, pad_end))
-            padding_mask_padded = F.pad(
-                padding_mask, (0, pad_end), value=False)
-           # cos_padded = F.pad(cos_t, (0, 0, 0, pad_end))
-            #sin_padded = F.pad(sin_t, (0, 0, 0, pad_end))
-        else:
-            x_padded = x
-            padding_mask_padded = padding_mask
-           # cos_padded = cos_t
-            #sin_padded = sin_t
-
-
-        windows = x_padded.unfold(1, W, W).permute(0, 3, 1, 2).contiguous()
-        windows = windows.flatten(0, 1)
-        seq_len_global = windows.shape[1]
-        
-        
-        cos_new, sin_new = self.global_rope(windows, seq_len=seq_len_global)
-
-        padding_mask_padded = padding_mask_padded.unfold(
-            1, W, W).transpose(1, 2).contiguous()
-        padding_mask_padded = padding_mask_padded.flatten(0, 1)
-
-        """cos_windows = cos_padded.unfold(
-            1, W, W).permute(0, 3, 1, 2).contiguous()
-        cos_windows = cos_windows.flatten(0, 1).unsqueeze(1)"""
-
-        """sin_windows = sin_padded.unfold(
-            1, W, W).permute(0, 3, 1, 2).contiguous()
-        sin_windows = sin_windows.flatten(0, 1).unsqueeze(1)"""
-
-        q, k, v = windows, windows, windows
-        pk = padding_mask_padded
-        return q, k, v, pk, cos_new, sin_new
-
-    def forward(self, x, padding_mask, cos=None, sin=None):
-        B, T, C = x.shape
-
-        q, k, v, pk, cos_windows, sin_windows = self.create_windows(
-            x, padding_mask=padding_mask, cos=cos, sin=sin)
-
-        attn_mask = pk
-        attn_output = self.rotary_mha(x_q=q,
-                                      x_k=k,
-                                      x_v=v,
-                                      cos_q=cos_windows,
-                                      sin_q=sin_windows,
-                                      cos_k=cos_windows,
-                                      sin_k=sin_windows,
-                                      key_padding_mask=attn_mask)
-
-        attn_output = attn_output.view(B, self.window_dilation, -1, C)
-        attn_output = attn_output.permute(
-            0, 2, 1, 3).contiguous().view(B, -1, C)
-        attn_output = attn_output[:, :T, :]
-        if torch.isnan(attn_output).any():
-            raise Exception("NaN values detected in GLOBAL attention output")
-        return attn_output.contiguous()
-
-
-class GatedFusion(nn.Module):
-    def __init__(self, d_model):
-        super().__init__()
-
-        self.gate_net = nn.Sequential(
-            nn.Linear(d_model * 2, d_model),
-            nn.GELU(),
-            nn.Linear(d_model, d_model),
-            nn.Sigmoid()
-        )
-        self.out_norm = nn.LayerNorm(d_model)
-
-    def forward(self, x_local, x_global):
-        combined = torch.cat([x_local, x_global], dim=-1)
-        alpha = self.gate_net(combined)
-
-        fused = alpha * x_global
-
-        return self.out_norm(fused)
-
-
 class RefinementBlock(nn.Module):
     def __init__(self, config, num_stages=4, num_layers=8, num_classes=None, dim=None, num_f_maps=64, detach=False):
         super().__init__()
@@ -431,10 +227,6 @@ class RefinementBlock(nn.Module):
         return last_stage_logits.transpose(1, 2), stages_output
 
 
-import torch
-import torch.nn as nn
-
-
 class Block(nn.Module):
     def __init__(self, config: ActionBERTConfig, dilation=1):
         super().__init__()
@@ -450,9 +242,9 @@ class Block(nn.Module):
         self.dropout = nn.Dropout(0)
 
         self.ffn = nn.Sequential(
-            nn.Linear(config.d_model, config.d_model ),
-           
-          
+            nn.Linear(config.d_model, config.d_model),
+
+
 
         )
         self.dilated_conv = DilatedConv(
@@ -464,7 +256,7 @@ class Block(nn.Module):
        # x = x.transpose(1, 2)
         x = norm_layer(x)
         # [B, D, T] -> [B, T, D]
-        return x   #.transpose(1, 2)
+        return x  # .transpose(1, 2)
 
     def forward(self, x, padding_mask, cos=None, sin=None):
         """
@@ -490,9 +282,7 @@ class Block(nn.Module):
         x = resid + self.dropout(ffn_out)
         x = x * mask
         return x
-        
-        
-        
+
         """inputs = x 
         mask = padding_mask.unsqueeze(-1).type_as(x)
 
@@ -521,7 +311,6 @@ class Block(nn.Module):
         return (out + res_fin) * mask"""
 
 
-
 class InputAugmentation(nn.Module):
     def __init__(self, noise_std=0.05, dropout_rate=0.3):
         super().__init__()
@@ -538,7 +327,8 @@ class InputAugmentation(nn.Module):
             x = self.channel_dropout(x)
             x = x.transpose(1, 2)
 
-        return  x * padding_mask.unsqueeze(-1).type_as(x)
+        return x * padding_mask.unsqueeze(-1).type_as(x)
+
 
 class ActionBERT(nn.Module):
     def __init__(self,
@@ -557,21 +347,21 @@ class ActionBERT(nn.Module):
             nn.Linear(config.d_model, config.d_model)
         )"""
         unknown_pseudo_class = 1
-        num_centers = config.known_classes if train_for_knowns else config.known_classes + unknown_pseudo_class
+        num_centers = len(config.known_classes) if train_for_knowns else len(
+            config.known_classes) + unknown_pseudo_class
 
         self.prototypes = nn.Linear(
-            config.d_model // 4, num_centers, bias=False)
+            config.d_model, num_centers, bias=False)
         self.prototypes_unk = nn.Linear(
-            config.d_model // 4, num_centers, bias=False)
+            config.d_model, num_centers, bias=False)
 
         self.final_norm = nn.LayerNorm(config.d_model)
-        
-        self.feature_purifier_enc = nn.Sequential(
-        nn.Linear(config.d_model, config.d_model // 4),
-        nn.GELU(),
-        nn.LayerNorm(config.d_model // 4)
-            )
 
+        self.feature_purifier_enc = nn.Sequential(
+            nn.Linear(config.d_model, config.d_model),
+            nn.GELU(),
+            nn.LayerNorm(config.d_model)
+        )
 
         self.rotary_emb = RotaryEmbedding(config.d_model // config.num_heads)
         self.masking_module = MaskingModule(config.input_dim, config.d_model)
@@ -586,17 +376,17 @@ class ActionBERT(nn.Module):
             num_classes=num_centers,
             num_stages=5,
             num_layers=12,
-            dim=num_centers, #+ 32,
+            dim=num_centers,  # + 32,
             num_f_maps=64,
-           )
+        )
 
         self.register_buffer("class_centers", torch.zeros(
-            num_centers, config.d_model // 4))
+            num_centers, config.d_model))
         self.register_buffer("centers_initialized", torch.zeros(
             num_centers, dtype=torch.bool))
 
         self.center_momentum = 0.99
-        
+
         self.input_aug = InputAugmentation()
 
     def _get_prototype_logits(self, x, m, prototypes):
@@ -604,8 +394,6 @@ class ActionBERT(nn.Module):
         count = m.sum(dim=1, keepdim=True)  # [B, 1, 1]
         video_mean = sum_x / (count + 1e-6)
         x = (x - video_mean) * m
-        
-        x = self._purify_features(x, m) * m
 
         x_norm = F.normalize(x, p=2, dim=-1)
         w_norm = F.normalize(prototypes.weight, p=2, dim=-1)
@@ -617,13 +405,13 @@ class ActionBERT(nn.Module):
         return prototype_logits, x
 
     def _train_unk(self, input, patch_mask, padding_mask,):
-        input =  self.input_aug(input, padding_mask)
-        
+        input = self.input_aug(input, padding_mask)
+
         x_for_unk = self.input_proj(input)
         seq_len = input.shape[1]
         cos, sin = self.rotary_emb(input, seq_len=seq_len)
         x_for_unk = x_for_unk * padding_mask.unsqueeze(-1).type_as(x_for_unk)
-        
+
         if self.training:
             x_for_unk = self.masking_module(x_for_unk, mask=patch_mask)
 
@@ -631,45 +419,42 @@ class ActionBERT(nn.Module):
             x_for_unk = layer(
                 x_for_unk, padding_mask=padding_mask, cos=cos, sin=sin)
         x_for_unk = self.final_norm(x_for_unk)
-        
+
         m = padding_mask.unsqueeze(-1).type_as(x_for_unk)
-        
+
         prototype_logits_unk, x_for_unk_centered = self._get_prototype_logits(
             x_for_unk, m, self.prototypes_unk)
-        
-
 
         refine_logits_unk = prototype_logits_unk * m
       #  progress_pred = self.progress_head(x_for_unk_centered)
-       # time_features = self.progress_expansion(progress_pred) 
+       # time_features = self.progress_expansion(progress_pred)
 
       #  refine_input = torch.cat([refine_logits_unk, x_for_unk_centered], dim=-1)
 
         unkown_logits, stages_output_unkown_logits = self.refinement_block(
             refine_logits_unk, padding_mask)
 
-        return prototype_logits_unk, unkown_logits, stages_output_unkown_logits, x_for_unk_centered,None
-    
+        return prototype_logits_unk, unkown_logits, stages_output_unkown_logits, x_for_unk_centered, None
+
     def _purify_features(self, x_centered, padding_mask):
         if self.training:
 
-            noise = torch.randn_like(x_centered) * 0.05 
+            noise = torch.randn_like(x_centered) * 0.05
             x_noisy = x_centered + noise
         else:
             x_noisy = x_centered
 
         purified_x = self.feature_purifier_enc(x_noisy)
       #  reconstructed_x = self.feature_purifier_dec(purified_x)
-     
+
         return purified_x
-    
+
     def _train_knowns(self, input, patch_mask, padding_mask,):
-        input =  self.input_aug(input, padding_mask)
+        input = self.input_aug(input, padding_mask)
         seq_len = input.shape[1]
         cos, sin = self.rotary_emb(input, seq_len=seq_len)
 
         x = self.input_proj(input)
-        
 
         x = x * padding_mask.unsqueeze(-1).type_as(x)
 
@@ -693,15 +478,15 @@ class ActionBERT(nn.Module):
             refine_logits, padding_mask)
         return prototype_logits, refine_logits, stages_output_logits, x, None
 
-    def forward(self, input, patch_mask, padding_mask, _run_name=None):
+    def forward(self, input, padding_mask, _run_name=None):
       #  global _current_run_name
        # _current_run_name = _run_name
         if self.train_for_knowns:
-            prototype_logits, refine_logits, stages_output_logits, x,progress_pred = self._train_knowns(
-                input, patch_mask, padding_mask)
+            prototype_logits, refine_logits, stages_output_logits, x, progress_pred = self._train_knowns(
+                input, None, padding_mask)
         else:
-            prototype_logits, refine_logits, stages_output_logits, x ,progress_pred= self._train_unk(
-                input, patch_mask, padding_mask)
+            prototype_logits, refine_logits, stages_output_logits, x, progress_pred = self._train_unk(
+                input, None, padding_mask)
 
         result = {"recon_features": None,
                   "recon_target": None,
