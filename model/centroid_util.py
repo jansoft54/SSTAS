@@ -23,18 +23,21 @@ def update_centroids(config: TrainerConfig, model, model_out, target_truth, know
 
             for c in range(len(config.known_classes)):
                 class_mask = (lbls_k == c)
+                c_idx = c
                 if class_mask.any():
                     batch_mean = embs_k[class_mask].mean(dim=0)
                     batch_mean = F.normalize(batch_mean, p=2, dim=0)
 
-                    if not model.centers_initialized[c]:
-                        model.class_centers[c] = batch_mean
-                        model.centers_initialized[c] = True
+                    mom = model.center_momentum
+
+                    if not model.centers_initialized[c_idx]:
+                        model.class_centers[c_idx] = batch_mean
+                        model.centers_initialized[c_idx] = True
                     else:
-                        model.class_centers[c] = model.center_momentum * model.class_centers[c] + \
-                            (1 - model.center_momentum) * batch_mean
-                        model.class_centers[c] = F.normalize(
-                            model.class_centers[c], p=2, dim=0)
+                        model.class_centers[c_idx] = mom * \
+                            model.class_centers[c_idx] + (1 - mom) * batch_mean
+                        model.class_centers[c_idx] = F.normalize(
+                            model.class_centers[c_idx], p=2, dim=0)
 
         # --- TEIL 2: Globales Unknown-Zentrum (Index N) ---
         # Wir prüfen, ob der Buffer Platz für N+1 Klassen hat
@@ -60,16 +63,16 @@ def update_centroids(config: TrainerConfig, model, model_out, target_truth, know
                     # Der echte Index im globalen class_centers Buffer
                     target_idx = len(config.known_classes) + s
 
-                    # Berechne den Mittelwert der Frames, die diesem Slot zugeordnet wurden
                     batch_mean_s = unk_embs[slot_mask].mean(dim=0)
                     batch_mean_s = F.normalize(batch_mean_s, p=2, dim=0)
 
+                    mom = model.center_momentum
                     if not model.centers_initialized[target_idx]:
                         model.class_centers[target_idx] = batch_mean_s
                         model.centers_initialized[target_idx] = True
                     else:
-                        # EMA Update
-                        model.class_centers[target_idx] = model.center_momentum * model.class_centers[target_idx] + \
-                            (1 - model.center_momentum) * batch_mean_s
+                        model.class_centers[target_idx] = mom * \
+                            model.class_centers[target_idx] + \
+                            (1 - mom) * batch_mean_s
                         model.class_centers[target_idx] = F.normalize(
                             model.class_centers[target_idx], p=2, dim=0)

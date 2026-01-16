@@ -357,12 +357,6 @@ class ActionBERT(nn.Module):
 
         self.final_norm = nn.LayerNorm(config.d_model)
 
-        self.feature_purifier_enc = nn.Sequential(
-            nn.Linear(config.d_model, config.d_model),
-            nn.GELU(),
-            nn.LayerNorm(config.d_model)
-        )
-
         self.rotary_emb = RotaryEmbedding(config.d_model // config.num_heads)
         self.masking_module = MaskingModule(config.input_dim, config.d_model)
 
@@ -385,7 +379,7 @@ class ActionBERT(nn.Module):
         self.register_buffer("centers_initialized", torch.zeros(
             num_centers, dtype=torch.bool))
 
-        self.center_momentum = 0.99
+        self.center_momentum = 0.95
 
         self.input_aug = InputAugmentation()
 
@@ -426,28 +420,11 @@ class ActionBERT(nn.Module):
             x_for_unk, m, self.prototypes_unk)
 
         refine_logits_unk = prototype_logits_unk * m
-      #  progress_pred = self.progress_head(x_for_unk_centered)
-       # time_features = self.progress_expansion(progress_pred)
-
-      #  refine_input = torch.cat([refine_logits_unk, x_for_unk_centered], dim=-1)
 
         unkown_logits, stages_output_unkown_logits = self.refinement_block(
             refine_logits_unk, padding_mask)
 
         return prototype_logits_unk, unkown_logits, stages_output_unkown_logits, x_for_unk_centered, None
-
-    def _purify_features(self, x_centered, padding_mask):
-        if self.training:
-
-            noise = torch.randn_like(x_centered) * 0.05
-            x_noisy = x_centered + noise
-        else:
-            x_noisy = x_centered
-
-        purified_x = self.feature_purifier_enc(x_noisy)
-      #  reconstructed_x = self.feature_purifier_dec(purified_x)
-
-        return purified_x
 
     def _train_knowns(self, input, patch_mask, padding_mask,):
         input = self.input_aug(input, padding_mask)

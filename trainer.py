@@ -12,6 +12,7 @@ import wandb
 import torch.nn.functional as F
 
 
+
 class Trainer():
     def __init__(self, trainer_config: TrainerConfig, model_config: ActionBERTConfig):
         self.config = trainer_config
@@ -125,9 +126,9 @@ class Trainer():
 
             if unknown_mask.any():
                 unk_logits = model_out["refine_logits"][unknown_mask][:,
-                                                                      self.config.known_classes:]
+                                                                      len(self.config.known_classes):]
                 winning_slots = torch.argmax(unk_logits.detach(), dim=-1)
-                pseudo_labels = winning_slots + self.config.known_classes
+                pseudo_labels = winning_slots + len(self.config.known_classes)
                 new_targets[unknown_mask] = pseudo_labels
 
             loss_inputs = {
@@ -190,8 +191,10 @@ class Trainer():
                 loss.backward()
 
                 self.optim.step()
-            # self.test_evaluator.eval(self.model, epoch)
-            # self.train_evaluator.eval(self.model, epoch)
+            """self.test_evaluator.eval(
+                self.model, epoch, self.config.known_classes, self.config.unknowns)
+            self.train_evaluator.eval(
+                self.model, epoch, self.config.known_classes, self.config.unknowns)"""
 
             print(
                 f"-------------------- Epoch {epoch+1}/{self.config.num_epochs} -------------------- ")

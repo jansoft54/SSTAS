@@ -15,6 +15,7 @@ class TrainerConfig:
     batch_size: int = 1
     known_classes: int = 14
     unknowns: int = 5
+    hold_outs:list = None
     K: int = 30
     total_classes: int = known_classes + K
 

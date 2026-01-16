@@ -32,29 +32,35 @@ set_deterministic(42)
 
 knowns = ["cut_tomato",
           "place_tomato_into_bowl",
-          "cut_cheese",
+
           "place_cheese_into_bowl",
           "cut_lettuce",
-          "place_lettuce_into_bowl",
+
           "add_salt",
-          "add_vinegar",
-          "add_oil",
+
           "add_pepper",
-          "mix_dressing",
+
           "peel_cucumber",
           "cut_cucumber",
           "place_cucumber_into_bowl",
           "add_dressing",
-          "mix_ingredients",
+
           "serve_salad_onto_plate",
           "action_start",
           "action_end",
           ]
-unknowns = []
+unknowns = [
+    "add_vinegar",
+    "add_oil",
+    "cut_cheese",
+    "mix_dressing",
+    "place_lettuce_into_bowl",
+    "mix_ingredients",
+]
 prototypes = 0
-train_for_knowns = True
+train_for_knowns = False
 
-for i in range(1, 2):
+for i in range(1, 6):
 
     print(f"train.split{i}.bundle")
     trainer_config = TrainerConfig(
@@ -66,7 +72,7 @@ for i in range(1, 2):
         K=prototypes,
         batch_size=1,
         num_epochs=45,
-        output_name=f"actionbert_full_known_split{i}_test"
+        output_name=f"actionbert_unk_split{i}_test"
     )
     bert_conf = ActionBERTConfig(
         known_classes=knowns,

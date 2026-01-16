@@ -252,24 +252,18 @@ class TotalLoss(nn.Module):
         """loss_pim = self.pim_loss(
             logits, target_labels, unknown_mask, known_mask) if self.pim_weight > 0 else zero"""
         logits = loss_dict["logits"]
-      #  refine_logits = loss_dict["refine_logits"]
         stage_output_logits = loss_dict["stages_output_logits"]
 
         known_mask = loss_dict["known_mask"]
         unknown_mask = loss_dict["unknown_mask"]
 
         target_labels = loss_dict["target_labels"]
-      #  recon_features = loss_dict["recon_features"]
-       # target_features = loss_dict["target_features"]
-        # patch_mask = loss_dict["patch_mask"]
+
         padding_mask = loss_dict["padding_mask"]
         embeddings = loss_dict["embeddings"]
         centers = loss_dict["centers"]
         prototypes = loss_dict["prototypes"]
         epoch = loss_dict["epoch"]
-
-      #  logits[:, :, -1] -= 2.0
-       # stage_output_logits[:,:,:,-1] -= 2.0
 
         loss_dice_stage_first = self.dice_loss(
             logits, target_labels, padding_mask & known_mask)
@@ -279,13 +273,13 @@ class TotalLoss(nn.Module):
             recon_features, target_features, patch_mask) if self.recon_weight > 0 else zero"""
 
         loss_smooth_stage_first = self.smooth_loss(
-            logits, padding_mask & known_mask) if self.smooth_weight > 0 else zero
+            logits, padding_mask) if self.smooth_weight > 0 else zero
 
         loss_contrastive_stage_first = self.contrastive_loss(
             embeddings, target_labels, centers, prototypes, known_mask) if epoch >= 15 else zero
 
         loss_smooth_stage_refine = sum([self.smooth_loss(
-            refine_logits_, padding_mask & known_mask) for _, refine_logits_ in enumerate(stage_output_logits)]) / len(stage_output_logits)
+            refine_logits_, padding_mask) for _, refine_logits_ in enumerate(stage_output_logits)]) / len(stage_output_logits)
 
         loss_dice_stage_refine = sum(
             [self.dice_loss(refine_logits_, target_labels, padding_mask & known_mask) for _, refine_logits_ in enumerate(stage_output_logits)]) / len(stage_output_logits)
@@ -293,16 +287,13 @@ class TotalLoss(nn.Module):
         loss_focal_stage_refine = sum([self.focal_loss(
             refine_logits_, target_labels, padding_mask & known_mask) for _, refine_logits_ in enumerate(stage_output_logits)]) / len(stage_output_logits)
 
-       # loss_video_progress =  self.video_progress_loss(loss_dict["progress_pred"], padding_mask)
         total_loss = (1 * loss_dice_stage_first +
                       1 * loss_focal_stage_first +
-                      # 0 * loss_recon_stage_first +
                       1.5 * loss_smooth_stage_first +
                       1.5 * loss_contrastive_stage_first +
                       1 * loss_dice_stage_refine +
                       1.5 * loss_smooth_stage_refine +
                       1 * loss_focal_stage_refine
-                      #    1.0 * loss_video_progress
 
 
                       )

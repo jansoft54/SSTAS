@@ -14,6 +14,7 @@ class VideoDataSet(Dataset):
                  default_path="./data/data/",
                  knowns: list = 0,
                  unknowns: list = 0,
+                 holdout_set:list = 0
                  ):
         self.default_path = default_path
         self.split = split
@@ -23,6 +24,7 @@ class VideoDataSet(Dataset):
         path = Path(f"{default_path}/{dataset}/splits/{split}")
         self.knowns = knowns
         self.unknowns = unknowns
+        self.holdout_set = holdout_set
 
         mapping_path = Path(f"{self.default_path}/{self.dataset}/mapping.txt")
         self.label_to_index = {}
@@ -60,7 +62,7 @@ class VideoDataSet(Dataset):
                 feature_name = line.split(".txt\n")[0]
 
                 features = self._load_features_(feature_name)
-                unknown_mask, foreground_mask, target_truth = self._load_target_(
+                unknown_mask, holdout_mask, target_truth = self._load_target_(
                     feature_name, self.label_to_index)
                 target_start, target_end = self.load_start_end_indices(
                     target_truth, unknown_mask)
@@ -70,7 +72,7 @@ class VideoDataSet(Dataset):
                 data_obj["split"] = split
                 data_obj["features"] = features
                 data_obj["unknown_mask"] = unknown_mask
-                data_obj["foreground_mask"] = foreground_mask
+                data_obj["holdout_mask"] = holdout_mask
 
                 data_obj["target_truth"] = target_truth
 
@@ -93,10 +95,15 @@ class VideoDataSet(Dataset):
         remapped_indices = [self.id_remap[oid] for oid in original_indices]
 
         target_tensor = torch.tensor(remapped_indices, dtype=torch.long)
-        unknown_mask = (target_tensor >= len(self.knowns)).bool()
+        
+        hold_out_ids = torch.tensor([self.id_remap[self.label_to_index[label]] for label in self.holdout_set ]).to(target_tensor.device)
+     
+        holdout_mask = torch.isin(target_tensor, hold_out_ids)
 
-        foreground_mask = (target_tensor != self.bg_class).bool()
-        return unknown_mask, foreground_mask, target_tensor
+        unknown_mask = (target_tensor >= len(self.knowns)).bool()
+        
+        
+        return unknown_mask, holdout_mask, target_tensor
 
     def load_start_end_indices(self, targets, unknown_mask):
         _, counts = torch.unique_consecutive(targets, return_counts=True)
@@ -137,7 +144,7 @@ class VideoDataLoader(DataLoader):
     def collate_fn(self, batch):
         features = [item["features"] for item in batch]
         unknown_mask = [item["unknown_mask"] for item in batch]
-        foreground_mask = [item["foreground_mask"] for item in batch]
+        holdout_mask = [item["holdout_mask"] for item in batch]
 
         targets_truth = [item["target_truth"] for item in batch]
         target_start = [item["target_start"] for item in batch]
@@ -150,24 +157,24 @@ class VideoDataLoader(DataLoader):
         padded_feats = torch.ones(len(batch), max_len, feat_dim) * 0
         padded_tgts_truth = torch.ones(len(batch), max_len).long() * -100
         padded_unknown_mask = torch.zeros(len(batch), max_len).bool()
-        padded_foreground_mask = torch.zeros(len(batch), max_len).bool()
+        padded_holdout_mask= torch.zeros(len(batch), max_len).bool()
 
         padding_mask = torch.zeros(len(batch), max_len).bool()
         padding_target_start = torch.ones(len(batch), max_len) * -100
         padding_target_end = torch.ones(len(batch), max_len) * -100
 
-        for i, (f, u, f_m, t_t, t_s, t_e) in enumerate(zip(features, unknown_mask, foreground_mask, targets_truth, target_start, target_end)):
+        for i, (f, u, h_m, t_t, t_s, t_e) in enumerate(zip(features, unknown_mask, holdout_mask, targets_truth, target_start, target_end)):
             padded_feats[i, :f.shape[0]] = f
             padded_tgts_truth[i, :t_t.shape[0]] = t_t
             padding_mask[i, :f.shape[0]] = True
             padded_unknown_mask[i, :u.shape[0]] = u
-            padded_foreground_mask[i, :f_m.shape[0]] = f_m
+            padded_holdout_mask[i, :h_m.shape[0]] = h_m
             padding_target_start[i, :t_s.shape[0]] = t_s
             padding_target_end[i, :t_e.shape[0]] = t_e
 
         return {"features": padded_feats,
                 "unknown_mask": padded_unknown_mask,
-                "foreground_mask": padded_foreground_mask,
+                "holdout_mask": padded_holdout_mask,
                 "padding_mask": padding_mask,
                 "target_truth": padded_tgts_truth,
                 "target_start": padding_target_start,

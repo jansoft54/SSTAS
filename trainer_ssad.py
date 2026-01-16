@@ -12,7 +12,6 @@ import wandb
 import torch.nn.functional as F
 
 
-
 class Trainer():
     def __init__(self, trainer_config: TrainerConfig, model_config: ActionBERTConfig):
         self.config = trainer_config
@@ -22,7 +21,8 @@ class Trainer():
                                                 default_path=trainer_config.default_path,
                                                 knowns=trainer_config.known_classes,
                                                 unknowns=trainer_config.unknowns,
-                                                total_classes=trainer_config.known_classes + trainer_config.K)
+                                                holdout_set=trainer_config.hold_outs
+                                                )
         self.train_data_loader = VideoDataLoader(
             self.train_video_dataset, batch_size=trainer_config.batch_size, shuffle=True)
 
@@ -31,15 +31,14 @@ class Trainer():
                                                default_path=trainer_config.default_path,
                                                knowns=trainer_config.known_classes,
                                                unknowns=trainer_config.unknowns,
-                                               total_classes=trainer_config.known_classes + trainer_config.K)
+                                                holdout_set=trainer_config.hold_outs
+                                               )
         self.test_data_loader = VideoDataLoader(
             self.test_video_dataset, len(self.test_video_dataset), shuffle=True)
 
         self.device = torch.device(
             "cuda" if torch.cuda.is_available() else "cpu")
-        
-       
-       
+
         self.total_loss = TotalLoss(
             trainer_config=trainer_config, class_weights=None)
 
@@ -47,7 +46,6 @@ class Trainer():
             self.test_data_loader, train=False)
         self.train_evaluator = DataEvaluation(
             self.train_data_loader, train=True)
-
 
     def add_model(self, model):
         self.model = model
@@ -72,46 +70,48 @@ class Trainer():
         wandb.define_metric("train-eval/*", step_metric="epoch")
         wandb.define_metric("test-eval/*", step_metric="epoch")
 
-    
     def target_gen(self, targets, known_mask):
         with torch.no_grad():
             B, T = targets.shape
             gt_dist_start = torch.full((B, T), -1.0, device=targets.device)
-            gt_dist_end   = torch.full((B, T), -1.0, device=targets.device)
+            gt_dist_end = torch.full((B, T), -1.0, device=targets.device)
 
             for b in range(B):
-            
-                vals, counts = torch.unique_consecutive(targets[b], return_counts=True)
-                
+
+                vals, counts = torch.unique_consecutive(
+                    targets[b], return_counts=True)
+
                 current_idx = 0
                 for length in counts:
                     length = length.item()
-                    
-                    if known_mask[b, current_idx]:
-                       
-                        gt_dist_start[b, current_idx : current_idx+length] = \
-                            torch.arange(length, dtype=torch.float, device=targets.device)
 
-                        gt_dist_end[b, current_idx : current_idx+length] = \
-                            torch.arange(length, dtype=torch.float, device=targets.device).flip(0)
-                    
+                    if known_mask[b, current_idx]:
+
+                        gt_dist_start[b, current_idx: current_idx+length] = \
+                            torch.arange(length, dtype=torch.float,
+                                         device=targets.device)
+
+                        gt_dist_end[b, current_idx: current_idx+length] = \
+                            torch.arange(length, dtype=torch.float,
+                                         device=targets.device).flip(0)
+
                     current_idx += length
-                    
+
             return gt_dist_start, gt_dist_end
-                    
+
     def _get_loss_dict(self, model_out, target_truth, unknown_mask, padding_mask, epoch):
 
-
-        gt_dist_start, gt_dist_end = self.target_gen(target_truth, (~unknown_mask) & padding_mask)
+        gt_dist_start, gt_dist_end = self.target_gen(
+            target_truth, (~unknown_mask) & padding_mask)
 
         loss_inputs = {
             "logits": model_out["prototype_logits"],
             "embeddings": model_out["embeddings"],
             "target_labels": target_truth,
-            "action_progress": model_out["action_progress"],
+            #   "multi_stage_embeddings": model_out["multi_stage_embeddings"],
             "gt_dist_start": gt_dist_start,
             "gt_dist_end": gt_dist_end,
-            
+
             "centers": self.model.class_centers,
             "prototypes": self.model.prototypes.weight,
 
@@ -135,18 +135,26 @@ class Trainer():
                 unknown_mask = batch["unknown_mask"].to(self.device)
                 target_truth = batch["target_truth"].to(self.device)
                 padding_mask = batch["padding_mask"].to(self.device)
-               
-                print(padding_mask.shape)
-              
+                holdout_mask = batch["holdout_mask"].to(self.device)
+
+             #   print(features.shape)
+                #only on holdouts and knowns
+                features = features[(~unknown_mask | holdout_mask)].unsqueeze(0)
+                target_truth = target_truth[(~unknown_mask | holdout_mask)].unsqueeze(0)
+                padding_mask = padding_mask[(~unknown_mask | holdout_mask)].unsqueeze(0)
+                unknown_mask = holdout_mask[(~unknown_mask | holdout_mask)].unsqueeze(0)
+                
+              #  print(features.shape)
+                
+              #  raise Exception()
+
                 self.model.train()
 
                 result = self.model(
                     features,  padding_mask=padding_mask)
 
-                
                 update_centroids(
                     self.config, self.model, result, target_truth, ~unknown_mask & padding_mask, unknown_mask & padding_mask)
-
 
                 loss_inputs = self._get_loss_dict(
                     result, target_truth, unknown_mask, padding_mask, epoch)
@@ -160,8 +168,10 @@ class Trainer():
                 loss.backward()
 
                 self.optim.step()
-            self.test_evaluator.eval(self.model, epoch)
-            self.train_evaluator.eval(self.model, epoch)
+            self.test_evaluator.eval(
+                self.model, epoch, self.config.known_classes, self.config.unknowns)
+            self.train_evaluator.eval(
+                self.model, epoch, self.config.known_classes, self.config.unknowns)
 
             print(
                 f"-------------------- Epoch {epoch+1}/{self.config.num_epochs} -------------------- ")

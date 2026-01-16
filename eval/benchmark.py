@@ -10,9 +10,10 @@ unknowns = 5
 
 
 class DataEvaluation:
-    def __init__(self, dataloader, train=False):
+    def __init__(self, dataloader, train=False, collapse_unk=False):
         self.loader = dataloader
         self.train = train
+        self.collapse_unk = collapse_unk
         self.device = torch.device(
             "cuda" if torch.cuda.is_available() else "cpu")
 
@@ -40,8 +41,12 @@ class DataEvaluation:
                 target_truth = batch["target_truth"].to(self.device)
                 padding_mask = batch["padding_mask"].to(self.device)
                 labels_dict = batch["labels_dict"]
+
                 unknown_mask = self.get_unk_mask(
                     unknown_ids, target_truth, labels_dict)
+
+                """if self.collapse_unk:
+                    target_truth[unknown_mask] = len(known_ids)"""
 
                 result = model(features, padding_mask)
 
@@ -53,7 +58,8 @@ class DataEvaluation:
 
                 known_ids_ = self.get_label_ids(
                     known_ids, labels_dict)
-                unknown_ids_ = self.get_label_ids(unknown_ids, labels_dict)
+                unknown_ids_ = self.get_label_ids(
+                    unknown_ids, labels_dict)  # if not self.collapse_unk else len(known_ids)
 
                 evaluator = Evaluator(evaluation_name="Evaluation",
                                       dataset="50salads",
@@ -69,7 +75,7 @@ class DataEvaluation:
 
               #  print("hallo")
 
-                for metric, value in known_perf.items():
+                """for metric, value in known_perf.items():
                     if metric not in gather_known:
                         gather_known[metric] = []
                     gather_known[metric].append(value)
@@ -77,17 +83,15 @@ class DataEvaluation:
                 for metric, value in unkown_perf.items():
                     if metric not in gather_unknown:
                         gather_unknown[metric] = []
-                    gather_unknown[metric].append(value)
+                    gather_unknown[metric].append(value)"""
 
                 known_perf["epoch"] = (epoch)
               #  unkown_perf["epoch"] = (epoch)
-                """if console_log:
-                    pass
-                else:
 
-                    import wandb
-                    wandb.log(known_pref)
-                    # wandb.log(unkown_perf)"""
+                import wandb
+                wandb.log(known_perf)
+
+                # wandb.log(unkown_perf)"""
 
                 # IMPORTANT !!!!!!!!!!!!!!!! break
 
